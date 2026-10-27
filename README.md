@@ -7,11 +7,6 @@ moving-average crossover to trigger an immediate trade, the design
 evaluates market context and applies additional decision and
 risk-management layers.
 
-> **Important:** Verify the current `.mq5` source before publishing
-> performance claims or exact timing values. The source reviewed for
-> this README contains a 180-second hold-time check, so this README
-> avoids claiming a 250--260 second hold time.
-
 ## Project Overview
 
 Aeonix combines several layers of analysis and trade management:
@@ -119,10 +114,8 @@ The reviewed source contains these default input values:
 These are source defaults, not guaranteed outcomes. Actual behavior can
 depend on broker execution, symbol specifications, configuration, and
 other EA logic.
+There is 180 sec HoldTime for SL
 
-The reviewed source also contains a **180-second hold-time check**. Do
-not describe the hold time as 250--260 seconds unless the latest `.mq5`
-file confirms that value.
 
 ## High-Level Workflow
 
