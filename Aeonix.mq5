@@ -263,7 +263,7 @@ bool ModeTrailGraceActive = false;
 bool ModeTrailGraceExitPending = false;
 bool ModeTrailGraceTimedOut = false;
 bool ModeTrailGraceStopWarningPrinted = false;
-double ModeTrailPeakPrice = 0.0;
+double ModeTrailPeakProfit = 0.0;
 double ModeTrailVirtualStop = 0.0;
 bool ModeTrailGraceUsed = false;
 bool ModeTrailMinimumReached = false;
@@ -1591,7 +1591,7 @@ void ManageModeTrailingSL()
          ModeTrailMinimumReached = false;
          ModeTrailHighProfitReached = false;
          ModeTrailGraceStopWarningPrinted = false;
-         ModeTrailPeakPrice = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
+         ModeTrailPeakProfit = 0.0;
          ModeTrailVirtualStop = 0.0;
       }
 
@@ -1625,14 +1625,10 @@ void ManageModeTrailingSL()
          );
       }
 
-      double favorablePrice = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
       if(ModeTrailGraceActive || ModeTrailHighProfitReached)
       {
-         if(type == POSITION_TYPE_BUY && favorablePrice > ModeTrailPeakPrice)
-            ModeTrailPeakPrice = favorablePrice;
-         else if(type == POSITION_TYPE_SELL &&
-                 (ModeTrailPeakPrice <= 0.0 || favorablePrice < ModeTrailPeakPrice))
-            ModeTrailPeakPrice = favorablePrice;
+         if(positionProfit > ModeTrailPeakProfit)
+            ModeTrailPeakProfit = positionProfit;
       }
 
       if(!ModeTrailGraceUsed &&
@@ -1645,7 +1641,7 @@ void ManageModeTrailingSL()
          ModeTrailGraceTimedOut = false;
          ModeTrailGraceUsed = true;
          ModeTrailGraceStartTime = TimeCurrent();
-         ModeTrailPeakPrice = favorablePrice;
+         ModeTrailPeakProfit = positionProfit;
          ModeTrailGraceStopWarningPrinted = false;
 
          GetAegisModeProfitParameters(
@@ -1673,7 +1669,7 @@ void ManageModeTrailingSL()
          ModeTrailGraceStopWarningPrinted = false;
 
          PrintFormat(
-            "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Trail=%.2f price units | TP=$%.2f",
+            "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Money trail=$%.2f | TP=$%.2f",
             ticket,
             ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
             ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
@@ -1721,14 +1717,41 @@ void ManageModeTrailingSL()
       if(!ModeTrailHighProfitReached)
          continue;
 
-      if(type == POSITION_TYPE_BUY && tick.bid > ModeTrailPeakPrice)
-         ModeTrailPeakPrice = tick.bid;
-      else if(type == POSITION_TYPE_SELL && tick.ask < ModeTrailPeakPrice)
-         ModeTrailPeakPrice = tick.ask;
+      if(positionProfit > ModeTrailPeakProfit)
+         ModeTrailPeakProfit = positionProfit;
 
+      double lockedProfit = ModeTrailPeakProfit - trailingDistance;
+      double tickValueProfit =
+         SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_PROFIT);
+      if(tickValueProfit <= 0.0)
+         tickValueProfit = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(lockedProfit <= 0.0 || tickValueProfit <= 0.0 || volume <= 0.0 ||
+         entryPrice <= 0.0)
+      {
+         if(!ModeTrailGraceStopWarningPrinted)
+         {
+            PrintFormat(
+               "AEGIS MONEY TRAIL CALCULATION FAILED | Ticket=%I64u | Peak profit=%.2f | Trail=%.2f | Tick value=%.8f | Volume=%.2f | Entry=%.8f",
+               ticket,
+               ModeTrailPeakProfit,
+               trailingDistance,
+               tickValueProfit,
+               volume,
+               entryPrice
+            );
+            ModeTrailGraceStopWarningPrinted = true;
+         }
+         continue;
+      }
+
+      double lockedPriceDistance =
+         (lockedProfit / (tickValueProfit * volume)) * tickSize;
       double newSL = type == POSITION_TYPE_BUY
-         ? ModeTrailPeakPrice - trailingDistance
-         : ModeTrailPeakPrice + trailingDistance;
+         ? entryPrice + lockedPriceDistance
+         : entryPrice - lockedPriceDistance;
 
       if(type == POSITION_TYPE_BUY)
       {
@@ -1797,14 +1820,14 @@ void ManageModeTrailingSL()
 
       ModeTrailGraceStopWarningPrinted = false;
       PrintFormat(
-         "AEGIS TRAIL UPDATED | Ticket=%I64u | Mode=%s | Profit=%.2f | Peak=%.*f | Intended distance=%.2f | SL=%.*f | TP=%.*f",
+         "AEGIS TRAIL UPDATED | Ticket=%I64u | Mode=%s | Profit=%.2f | Peak profit=%.2f | Trail=$%.2f | Target lock=$%.2f | SL=%.*f | TP=%.*f",
          ticket,
          ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
          ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
          positionProfit,
-         digits,
-         ModeTrailPeakPrice,
+         ModeTrailPeakProfit,
          trailingDistance,
+         lockedProfit,
          digits,
          newSL,
          digits,
@@ -1851,7 +1874,7 @@ bool EnforceAegisTrailGraceLoss()
       ModeTrailGraceActive = false;
       ModeTrailHighProfitReached = true;
       PrintFormat(
-         "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Trail=%.2f price units | TP=$%.2f",
+         "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Money trail=$%.2f | TP=$%.2f",
          ModeTrailGraceTicket,
          ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
          ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
@@ -1929,7 +1952,7 @@ ModeTrailGraceExitPending = false;
 ModeTrailGraceTimedOut = false;
 ModeTrailGraceUsed = false;
 ModeTrailGraceStopWarningPrinted = false;
-ModeTrailPeakPrice = 0.0;
+ModeTrailPeakProfit = 0.0;
 ModeTrailVirtualStop = 0.0;
 ModeTrailMinimumReached = false;
 ModeTrailHighProfitReached = false;
