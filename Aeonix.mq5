@@ -265,6 +265,7 @@ int RecoveryTimerSeconds = 120;
 bool RecoveryReached = false;
 bool HadDeepDrawdown = false;
 input double TradeSLMoney = 2.00;
+input double AegisModeLockLoss = 1.00;
 input int AegisTrailGraceSeconds = 45;
 input double AegisTrailGraceMaxLoss = 0.40;
 
@@ -275,10 +276,14 @@ AegisProfitMode ModeTrailGraceMode = PROFIT_MODE_NORMAL;
 datetime ModeTrailGraceStartTime = 0;
 bool ModeTrailGraceStarted = false;
 bool ModeTrailGraceActive = false;
+bool ModeTrailGraceExitPending = false;
+bool ModeTrailGraceTimedOut = false;
 bool ModeTrailGraceStopWarningPrinted = false;
 double ModeTrailPeakPrice = 0.0;
 double ModeTrailVirtualStop = 0.0;
 bool ModeTrailGraceUsed = false;
+bool ModeTrailMinimumReached = false;
+bool ModeTrailHighProfitReached = false;
 ulong LastPostGraceAttemptTicket = 0;
 double LastPostGraceAttemptSL = 0.0;
 datetime LastPostGraceAttemptTime = 0;
@@ -287,10 +292,11 @@ datetime LastPostGraceAttemptTime = 0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(AegisTrailGraceSeconds <= 0 ||
+   if(AegisModeLockLoss <= 0.0 ||
+      AegisTrailGraceSeconds <= 0 ||
       AegisTrailGraceMaxLoss <= 0.0)
    {
-      Print("ERROR: Aegis trail grace inputs must be greater than zero.");
+      Print("ERROR: Aegis mode-management inputs must be greater than zero.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -1321,9 +1327,17 @@ bool EnforceMoneyStopLoss()
          PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+      if(ticket == ModeTrailGraceTicket &&
+         (ModeTrailGraceActive || ModeTrailHighProfitReached))
+         continue;
 
-      if(positionProfit > -TradeSLMoney)
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+      double stopLossLimit = ticket == ModeTrailGraceTicket &&
+         ModeTrailMinimumReached
+         ? AegisModeLockLoss
+         : TradeSLMoney;
+
+      if(positionProfit > -stopLossLimit)
          continue;
 
       stopTriggered = true;
@@ -1337,7 +1351,7 @@ bool EnforceMoneyStopLoss()
             "MONEY SL CLOSE FAILED | Ticket=%I64u | Profit=%.2f | Target=-%.2f | Retcode=%u | %s",
             ticket,
             positionProfit,
-            TradeSLMoney,
+            stopLossLimit,
             retcode,
             trade.ResultRetcodeDescription()
          );
@@ -1348,7 +1362,7 @@ bool EnforceMoneyStopLoss()
             "MONEY SL HIT | Ticket=%I64u | Profit=%.2f | Limit=-%.2f",
             ticket,
             positionProfit,
-            TradeSLMoney
+            stopLossLimit
          );
       }
    }
@@ -1430,9 +1444,17 @@ void RetryFixedSL()
       if(entry <= 0.0 || volume <= 0.0)
          continue;
 
-      // Calculate the $2 risk distance from ORIGINAL ENTRY.
+      if(ticket == ModeTrailGraceTicket &&
+         (ModeTrailGraceActive || ModeTrailHighProfitReached))
+         continue;
+
+      double stopLossLimit = ticket == ModeTrailGraceTicket &&
+         ModeTrailMinimumReached
+         ? AegisModeLockLoss
+         : TradeSLMoney;
+
       double slDistance =
-         (TradeSLMoney / (tickValue * volume)) * tickSize;
+         (stopLossLimit / (tickValue * volume)) * tickSize;
 
       double newSL = 0.0;
 
@@ -1445,7 +1467,7 @@ void RetryFixedSL()
          if(oldSL > 0.0 && newSL <= oldSL)
             continue;
 
-         // Wait until broker permits the entry-based $2 SL.
+         // Wait until the broker permits the configured entry-based SL.
          if(tick.bid - newSL < minDistance)
             continue;
       }
@@ -1458,7 +1480,7 @@ void RetryFixedSL()
          if(oldSL > 0.0 && newSL >= oldSL)
             continue;
 
-         // Wait until broker permits the entry-based $2 SL.
+         // Wait until the broker permits the configured entry-based SL.
          if(newSL - tick.ask < minDistance)
             continue;
       }
@@ -1474,8 +1496,9 @@ void RetryFixedSL()
       if(!modified || retcode != TRADE_RETCODE_DONE)
       {
          PrintFormat(
-            "2 DOLLAR SL RETRY FAILED | Ticket=%I64u | Retcode=%u | %s",
+            "MONEY SL RETRY FAILED | Ticket=%I64u | Target=-%.2f | Retcode=%u | %s",
             ticket,
+            stopLossLimit,
             retcode,
             trade.ResultRetcodeDescription()
          );
@@ -1483,13 +1506,13 @@ void RetryFixedSL()
       else
       {
          PrintFormat(
-            "2 DOLLAR ENTRY SL UPDATED | Ticket=%I64u | Entry=%.*f | SL=%.*f | TARGET LOSS=%.2f",
+            "ENTRY MONEY SL UPDATED | Ticket=%I64u | Entry=%.*f | SL=%.*f | TARGET LOSS=%.2f",
             ticket,
             digits,
             entry,
             digits,
             newSL,
-            TradeSLMoney
+            stopLossLimit
          );
       }
    }
@@ -1503,479 +1526,306 @@ void RetryFixedSL()
 
 
 
+void GetAegisModeProfitParameters(
+   AegisProfitMode mode,
+   double &minimumProfit,
+   double &handoffProfit,
+   double &trailingDistance
+)
+{
+   if(mode == PROFIT_MODE_RUNNER)
+   {
+      minimumProfit = 0.20;
+      handoffProfit = 0.90;
+      trailingDistance = 0.50;
+   }
+   else if(mode == PROFIT_MODE_TIGHT)
+   {
+      minimumProfit = 0.15;
+      handoffProfit = 0.80;
+      trailingDistance = 0.30;
+   }
+   else
+   {
+      minimumProfit = 0.15;
+      handoffProfit = 0.80;
+      trailingDistance = 0.40;
+   }
+}
+
 void ManageModeTrailingSL()
 {
    if(BasketDirection == 0)
       return;
 
-   AegisProfitMode mode = GetAegisProfitMode();
-
    MqlTick tick;
-
    if(!SymbolInfoTick(_Symbol, tick))
       return;
 
-   double tickSize =
-      SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-
-   double point =
-      SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(tickSize <= 0.0 || point <= 0.0)
       return;
 
-   int digits =
-      (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-
-   double stopLevel =
-      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-
-   double freezeLevel =
-      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
-
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double minimumDistance =
-      MathMax(stopLevel, freezeLevel) + tickSize;
+      MathMax(
+         SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+         SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL)
+      ) * point + tickSize;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-
       if(ticket == 0 || !PositionSelectByTicket(ticket))
          continue;
 
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
-
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber ||
+         PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
       ENUM_POSITION_TYPE type =
          (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(type != POSITION_TYPE_BUY && type != POSITION_TYPE_SELL)
+         continue;
 
       double positionProfit = PositionGetDouble(POSITION_PROFIT);
-
-      double trailingPriceDistance = 0.0;
-      double activationProfit = 0.0;
-
-      if(ModeTrailGraceStarted)
-         mode = ModeTrailGraceMode;
-
-      if(mode == PROFIT_MODE_RUNNER)
-      {
-         activationProfit = 0.20;
-         trailingPriceDistance = 0.50;
-      }
-      else if(mode == PROFIT_MODE_NORMAL)
-      {
-         activationProfit = 0.15;
-         trailingPriceDistance = 0.35;
-      }
-      else if(mode == PROFIT_MODE_TIGHT)
-      {
-         activationProfit = 0.15;
-         trailingPriceDistance = 0.25;
-      }
+      AegisProfitMode currentMode = GetAegisProfitMode();
 
       if(ModeTrailGraceTicket != ticket)
       {
          ModeTrailGraceTicket = ticket;
          ModeTrailActivationTicks = 0;
-         ModeTrailActivationMode = mode;
-         ModeTrailGraceMode = mode;
+         ModeTrailActivationMode = currentMode;
+         ModeTrailGraceMode = currentMode;
          ModeTrailGraceStartTime = 0;
          ModeTrailGraceStarted = false;
          ModeTrailGraceActive = false;
+         ModeTrailGraceExitPending = false;
+         ModeTrailGraceTimedOut = false;
+         ModeTrailGraceUsed = false;
+         ModeTrailMinimumReached = false;
+         ModeTrailHighProfitReached = false;
          ModeTrailGraceStopWarningPrinted = false;
          ModeTrailPeakPrice = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
          ModeTrailVirtualStop = 0.0;
       }
 
-      if(!ModeTrailGraceUsed)
+      if(!ModeTrailMinimumReached && !ModeTrailGraceUsed)
+         ModeTrailActivationMode = currentMode;
+
+      AegisProfitMode mode = ModeTrailGraceUsed
+         ? ModeTrailGraceMode
+         : ModeTrailActivationMode;
+
+      double minimumProfit = 0.0;
+      double handoffProfit = 0.0;
+      double trailingDistance = 0.0;
+      GetAegisModeProfitParameters(
+         mode,
+         minimumProfit,
+         handoffProfit,
+         trailingDistance
+      );
+
+      if(!ModeTrailMinimumReached && positionProfit >= minimumProfit)
       {
-         if(ModeTrailActivationMode != mode)
-         {
-            ModeTrailActivationMode = mode;
-            ModeTrailActivationTicks = 0;
-         }
-
-         if(positionProfit >= activationProfit * 2.0)
-            ModeTrailActivationTicks++;
-         else
-            ModeTrailActivationTicks = 0;
-
-         if(ModeTrailActivationTicks >= 2)
-         {
-            ModeTrailGraceMode = mode;
-            ModeTrailGraceStarted = true;
-            ModeTrailGraceActive = true;
-            ModeTrailGraceUsed = true;
-            ModeTrailActivationTicks = 0;
-            ModeTrailGraceStartTime = TimeCurrent();
-
-            PrintFormat(
-               "AEGIS TRAIL GRACE STARTED | Ticket=%I64u | Mode=%s | Profit=%.2f | Grace=%d sec | MaxLoss=-%.2f",
-               ticket,
-               mode == PROFIT_MODE_RUNNER ? "RUNNER" :
-               mode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
-               positionProfit,
-               AegisTrailGraceSeconds,
-               AegisTrailGraceMaxLoss
-            );
-         }
+         ModeTrailMinimumReached = true;
+         PrintFormat(
+            "AEGIS MINIMUM PROFIT REACHED | Ticket=%I64u | Mode=%s | Profit=%.2f | Broker SL target=-%.2f | No trailing yet",
+            ticket,
+            mode == PROFIT_MODE_RUNNER ? "RUNNER" :
+            mode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+            positionProfit,
+            AegisModeLockLoss
+         );
       }
 
-      double effectiveDistance =
-         MathMax(trailingPriceDistance, minimumDistance);
+      double favorablePrice = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
+      if(ModeTrailGraceActive || ModeTrailHighProfitReached)
+      {
+         if(type == POSITION_TYPE_BUY && favorablePrice > ModeTrailPeakPrice)
+            ModeTrailPeakPrice = favorablePrice;
+         else if(type == POSITION_TYPE_SELL &&
+                 (ModeTrailPeakPrice <= 0.0 || favorablePrice < ModeTrailPeakPrice))
+            ModeTrailPeakPrice = favorablePrice;
+      }
+
+      if(!ModeTrailGraceUsed &&
+         positionProfit >= minimumProfit * 2.0)
+      {
+         ModeTrailGraceMode = mode;
+         ModeTrailGraceStarted = true;
+         ModeTrailGraceActive = true;
+         ModeTrailGraceExitPending = false;
+         ModeTrailGraceTimedOut = false;
+         ModeTrailGraceUsed = true;
+         ModeTrailGraceStartTime = TimeCurrent();
+         ModeTrailPeakPrice = favorablePrice;
+         ModeTrailGraceStopWarningPrinted = false;
+
+         GetAegisModeProfitParameters(
+            ModeTrailGraceMode,
+            minimumProfit,
+            handoffProfit,
+            trailingDistance
+         );
+
+         PrintFormat(
+            "AEGIS GRACE STARTED | Ticket=%I64u | Mode=%s | Profit=%.2f | Grace=%d sec | Software loss limit=-%.2f",
+            ticket,
+            ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
+            ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+            positionProfit,
+            AegisTrailGraceSeconds,
+            AegisTrailGraceMaxLoss
+         );
+      }
+
+      if(ModeTrailGraceActive && positionProfit >= handoffProfit)
+      {
+         ModeTrailGraceActive = false;
+         ModeTrailHighProfitReached = true;
+         ModeTrailGraceStopWarningPrinted = false;
+
+         PrintFormat(
+            "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Trail=%.2f price units | TP=$%.2f",
+            ticket,
+            ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
+            ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+            positionProfit,
+            trailingDistance,
+            BasketTP
+         );
+      }
 
       double currentSL = PositionGetDouble(POSITION_SL);
       double currentTP = PositionGetDouble(POSITION_TP);
 
-      if(positionProfit >= activationProfit &&
-         type == POSITION_TYPE_BUY &&
-         tick.bid > ModeTrailPeakPrice)
-         ModeTrailPeakPrice = tick.bid;
-      else if(positionProfit >= activationProfit &&
-              type == POSITION_TYPE_SELL &&
-              (ModeTrailPeakPrice <= 0.0 || tick.ask < ModeTrailPeakPrice))
-         ModeTrailPeakPrice = tick.ask;
-
-      if(type == POSITION_TYPE_BUY)
-         ModeTrailVirtualStop = NormalizeDouble(
-            MathFloor((ModeTrailPeakPrice - effectiveDistance) / tickSize) * tickSize,
-            digits
-         );
-      else
-         ModeTrailVirtualStop = NormalizeDouble(
-            MathCeil((ModeTrailPeakPrice + effectiveDistance) / tickSize) * tickSize,
-            digits
-         );
-
-      if(ModeTrailGraceStarted && !ModeTrailGraceActive)
-      {
-         bool trailHit =
-            (type == POSITION_TYPE_BUY && tick.bid <= ModeTrailVirtualStop) ||
-            (type == POSITION_TYPE_SELL && tick.ask >= ModeTrailVirtualStop);
-
-         if(trailHit)
-         {
-            bool closed = trade.PositionClose(ticket);
-            uint retcode = trade.ResultRetcode();
-
-            if(!closed || retcode != TRADE_RETCODE_DONE)
-            {
-               PrintFormat(
-                  "AEGIS POST-GRACE TRAIL EXIT FAILED | Ticket=%I64u | SL=%.*f | Retcode=%u | %s",
-                  ticket,
-                  digits,
-                  ModeTrailVirtualStop,
-                  retcode,
-                  trade.ResultRetcodeDescription()
-               );
-            }
-            else
-            {
-               PrintFormat(
-                  "AEGIS POST-GRACE TRAIL EXIT | Ticket=%I64u | SL=%.*f",
-                  ticket,
-                  digits,
-                  ModeTrailVirtualStop
-               );
-               ResetBasket();
-            }
-            return;
-         }
-
-         // Recheck the live quote with extra tick-size room to avoid stop-level
-         // rejects if the quote moves between calculation and order submission.
-         double submitDistance = minimumDistance + tickSize;
-         double submitSL = ModeTrailVirtualStop;
-
-         if(type == POSITION_TYPE_BUY)
-         {
-            double highestLegalSL = tick.bid - submitDistance;
-            submitSL = MathMin(submitSL, highestLegalSL);
-            submitSL = MathFloor(submitSL / tickSize) * tickSize;
-         }
-         else
-         {
-            double lowestLegalSL = tick.ask + submitDistance;
-            submitSL = MathMax(submitSL, lowestLegalSL);
-            submitSL = MathCeil(submitSL / tickSize) * tickSize;
-         }
-
-         submitSL = NormalizeDouble(submitSL, digits);
-
-         // A post-grace stop may tighten protection, but must never loosen it.
-         bool alreadyProtected =
-            type == POSITION_TYPE_BUY
-            ? (currentSL > 0.0 && currentSL >= ModeTrailVirtualStop)
-            : (currentSL > 0.0 && currentSL <= ModeTrailVirtualStop);
-
-         if(alreadyProtected)
-         {
-            PrintFormat(
-               "AEGIS POST-GRACE TRAIL ALREADY PROTECTED | Ticket=%I64u | ExistingSL=%.*f | Trail=%.*f",
-               ticket,
-               digits,
-               currentSL,
-               digits,
-               ModeTrailVirtualStop
-            );
-            ModeTrailGraceStarted = false;
-            ModeTrailGraceStartTime = 0;
-            ModeTrailGraceStopWarningPrinted = false;
-            continue;
-         }
-
-         bool improvesStop =
-            currentSL <= 0.0 ||
-            (type == POSITION_TYPE_BUY && submitSL > currentSL) ||
-            (type == POSITION_TYPE_SELL && submitSL < currentSL);
-
-         double submitRoom = type == POSITION_TYPE_BUY
-            ? tick.bid - submitSL
-            : submitSL - tick.ask;
-
-         double takeProfitRoom = type == POSITION_TYPE_BUY
-            ? currentTP - tick.bid
-            : tick.ask - currentTP;
-
-         if(!improvesStop || submitRoom < submitDistance)
-         {
-            if(!ModeTrailGraceStopWarningPrinted)
-            {
-               PrintFormat(
-                  "AEGIS POST-GRACE TRAIL DEFERRED | Ticket=%I64u | SL=%.*f | Room=%.5f | Required=%.5f",
-                  ticket,
-                  digits,
-                  submitSL,
-                  submitRoom,
-                  submitDistance
-               );
-               ModeTrailGraceStopWarningPrinted = true;
-            }
-            continue;
-         }
-
-         if(currentTP > 0.0 &&
-            freezeLevel > 0.0 &&
-            takeProfitRoom <= freezeLevel + tickSize)
-         {
-            if(!ModeTrailGraceStopWarningPrinted)
-            {
-               PrintFormat(
-                  "AEGIS POST-GRACE TRAIL DEFERRED BY TP FREEZE | Ticket=%I64u | TP=%.*f | Room=%.5f | Freeze=%.5f",
-                  ticket,
-                  digits,
-                  currentTP,
-                  takeProfitRoom,
-                  freezeLevel
-               );
-               ModeTrailGraceStopWarningPrinted = true;
-            }
-            continue;
-         }
-
-         if(LastPostGraceAttemptTicket == ticket &&
-            MathAbs(LastPostGraceAttemptSL - submitSL) < tickSize * 0.5 &&
-            TimeCurrent() - LastPostGraceAttemptTime < 2)
-            continue;
-
-         LastPostGraceAttemptTicket = ticket;
-         LastPostGraceAttemptSL = submitSL;
-         LastPostGraceAttemptTime = TimeCurrent();
-
-         bool applied = trade.PositionModify(ticket, submitSL, currentTP);
-         uint retcode = trade.ResultRetcode();
-
-         if(!applied || retcode != TRADE_RETCODE_DONE)
-         {
-            if(!ModeTrailGraceStopWarningPrinted)
-            {
-               PrintFormat(
-                  "AEGIS POST-GRACE TRAIL UPDATE FAILED | Ticket=%I64u | SL=%.*f | Retcode=%u | %s",
-                  ticket,
-                  digits,
-                  submitSL,
-                  retcode,
-                  trade.ResultRetcodeDescription()
-               );
-               ModeTrailGraceStopWarningPrinted = true;
-            }
-            continue;
-         }
-
-         PrintFormat(
-            "AEGIS GRACE TRAIL APPLIED | Ticket=%I64u | Mode=%s | Peak=%.5f | SL=%.*f",
-            ticket,
-            mode == PROFIT_MODE_RUNNER ? "RUNNER" :
-            mode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
-            ModeTrailPeakPrice,
-            digits,
-            submitSL
-         );
-
-         ModeTrailGraceStarted = false;
-         ModeTrailGraceStartTime = 0;
-         ModeTrailGraceStopWarningPrinted = false;
-         currentSL = submitSL;
-      }
-
       if(ModeTrailGraceActive)
       {
-         double tickValueLoss =
-            SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-         if(tickValueLoss <= 0.0)
-            tickValueLoss = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-
-         double volume = PositionGetDouble(POSITION_VOLUME);
-         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-
-         if(tickValueLoss <= 0.0 || volume <= 0.0 || entry <= 0.0)
+         if(currentSL > 0.0)
          {
-            if(!ModeTrailGraceStopWarningPrinted)
-            {
-               PrintFormat(
-                  "AEGIS GRACE STOP UNAVAILABLE | Ticket=%I64u | TickValue=%.5f | Volume=%.2f | Entry=%.5f",
-                  ticket,
-                  tickValueLoss,
-                  volume,
-                  entry
-               );
-               ModeTrailGraceStopWarningPrinted = true;
-            }
-            continue;
-         }
-
-         double graceStopDistance =
-            (AegisTrailGraceMaxLoss / (tickValueLoss * volume)) * tickSize;
-         double graceSL = type == POSITION_TYPE_BUY
-            ? MathCeil((entry - graceStopDistance) / tickSize) * tickSize
-            : MathFloor((entry + graceStopDistance) / tickSize) * tickSize;
-         graceSL = NormalizeDouble(graceSL, digits);
-
-         double graceStopRoom = type == POSITION_TYPE_BUY
-            ? tick.bid - graceSL
-            : graceSL - tick.ask;
-         double graceSubmitDistance = minimumDistance + tickSize;
-
-         if(graceStopRoom < graceSubmitDistance)
-         {
-            if(!ModeTrailGraceStopWarningPrinted)
-            {
-               PrintFormat(
-                  "AEGIS GRACE STOP BLOCKED BY BROKER DISTANCE | Ticket=%I64u | Required=%.5f | Available=%.5f",
-                  ticket,
-                  graceSubmitDistance,
-                  graceStopRoom
-               );
-               ModeTrailGraceStopWarningPrinted = true;
-            }
-            continue;
-         }
-
-         if(currentSL <= 0.0 || MathAbs(currentSL - graceSL) >= tickSize * 0.5)
-         {
-            bool modified = trade.PositionModify(ticket, graceSL, currentTP);
+            bool removed = trade.PositionModify(ticket, 0.0, currentTP);
             uint retcode = trade.ResultRetcode();
-
-            if(!modified || retcode != TRADE_RETCODE_DONE)
+            if(!removed || retcode != TRADE_RETCODE_DONE)
             {
                if(!ModeTrailGraceStopWarningPrinted)
                {
                   PrintFormat(
-                     "AEGIS GRACE STOP UPDATE FAILED | Ticket=%I64u | SL=%.*f | Retcode=%u | %s",
+                     "AEGIS GRACE SL REMOVAL FAILED | Ticket=%I64u | Retcode=%u | %s | Software loss check remains active",
                      ticket,
-                     digits,
-                     graceSL,
                      retcode,
                      trade.ResultRetcodeDescription()
                   );
                   ModeTrailGraceStopWarningPrinted = true;
                }
-               continue;
             }
-
-            ModeTrailGraceStopWarningPrinted = false;
+            else
+            {
+               ModeTrailGraceStopWarningPrinted = false;
+               PrintFormat(
+                  "AEGIS GRACE BROKER SL REMOVED | Ticket=%I64u | Software loss limit=-%.2f",
+                  ticket,
+                  AegisTrailGraceMaxLoss
+               );
+            }
          }
-
          continue;
       }
 
-      if(positionProfit < activationProfit)
+      if(!ModeTrailHighProfitReached)
          continue;
 
-      double newSL = 0.0;
+      if(type == POSITION_TYPE_BUY && tick.bid > ModeTrailPeakPrice)
+         ModeTrailPeakPrice = tick.bid;
+      else if(type == POSITION_TYPE_SELL && tick.ask < ModeTrailPeakPrice)
+         ModeTrailPeakPrice = tick.ask;
 
-      // BUY trailing.
+      double newSL = type == POSITION_TYPE_BUY
+         ? ModeTrailPeakPrice - trailingDistance
+         : ModeTrailPeakPrice + trailingDistance;
+
       if(type == POSITION_TYPE_BUY)
       {
-         newSL = tick.bid - effectiveDistance;
-
-         // Round downward to a valid tick.
+         newSL = MathMin(newSL, tick.bid - minimumDistance);
          newSL = MathFloor(newSL / tickSize) * tickSize;
-         newSL = NormalizeDouble(newSL, digits);
-
-         if(tick.bid - newSL < minimumDistance)
-            continue;
-
-         // Never loosen BUY SL.
-         if(currentSL > 0.0 && newSL <= currentSL)
-            continue;
-      }
-
-      // SELL trailing.
-      else if(type == POSITION_TYPE_SELL)
-      {
-         newSL = tick.ask + effectiveDistance;
-
-         // Round upward to a valid tick.
-         newSL = MathCeil(newSL / tickSize) * tickSize;
-         newSL = NormalizeDouble(newSL, digits);
-
-         if(newSL - tick.ask < minimumDistance)
-            continue;
-
-         // Never loosen SELL SL.
-         if(currentSL > 0.0 && newSL >= currentSL)
-            continue;
       }
       else
+      {
+         newSL = MathMax(newSL, tick.ask + minimumDistance);
+         newSL = MathCeil(newSL / tickSize) * tickSize;
+      }
+      newSL = NormalizeDouble(newSL, digits);
+
+      if(newSL <= 0.0)
          continue;
 
-      bool modified =
-         trade.PositionModify(ticket, newSL, currentTP);
+      double newTP = currentTP;
+      if(newTP <= 0.0)
+      {
+         double ignoredSL = 0.0;
+         if(!CalculateBrokerSLTP(
+               type == POSITION_TYPE_BUY,
+               PositionGetDouble(POSITION_PRICE_OPEN),
+               PositionGetDouble(POSITION_VOLUME),
+               ignoredSL,
+               newTP))
+         {
+            PrintFormat("AEGIS HANDOFF TP CALCULATION FAILED | Ticket=%I64u", ticket);
+            continue;
+         }
+      }
 
+      bool improvesStop = currentSL <= 0.0 ||
+         (type == POSITION_TYPE_BUY && newSL > currentSL) ||
+         (type == POSITION_TYPE_SELL && newSL < currentSL);
+
+      if(!improvesStop)
+         newSL = currentSL;
+
+      bool stopChanged = currentSL <= 0.0 ||
+         MathAbs(newSL - currentSL) >= tickSize * 0.5;
+      bool targetChanged = currentTP <= 0.0;
+      if(!stopChanged && !targetChanged)
+         continue;
+
+      bool modified = trade.PositionModify(ticket, newSL, newTP);
       uint retcode = trade.ResultRetcode();
-
-      if(modified && retcode == TRADE_RETCODE_DONE)
+      if(!modified || retcode != TRADE_RETCODE_DONE)
       {
-         double actualDistance =
-            type == POSITION_TYPE_BUY
-            ? tick.bid - newSL
-            : newSL - tick.ask;
+         if(!ModeTrailGraceStopWarningPrinted)
+         {
+            PrintFormat(
+               "AEGIS HANDOFF TRAIL UPDATE FAILED | Ticket=%I64u | SL=%.*f | TP=%.*f | Retcode=%u | %s",
+               ticket,
+               digits,
+               newSL,
+               digits,
+               newTP,
+               retcode,
+               trade.ResultRetcodeDescription()
+            );
+            ModeTrailGraceStopWarningPrinted = true;
+         }
+         continue;
+      }
 
-         PrintFormat(
-            "AEGIS TRAILING UPDATED | Ticket=%I64u | Mode=%s | Profit=%.2f | IntendedPriceDistance=%.5f | ActualDistance=%.5f | SL=%.*f",
-            ticket,
-            mode == PROFIT_MODE_RUNNER ? "RUNNER" :
-            mode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
-            positionProfit,
-            trailingPriceDistance,
-            actualDistance,
-            digits,
-            newSL
-         );
-      }
-      else
-      {
-         PrintFormat(
-            "AEGIS TRAILING FAILED | Ticket=%I64u | Retcode=%u | %s",
-            ticket,
-            retcode,
-            trade.ResultRetcodeDescription()
-         );
-      }
+      ModeTrailGraceStopWarningPrinted = false;
+      PrintFormat(
+         "AEGIS TRAIL UPDATED | Ticket=%I64u | Mode=%s | Profit=%.2f | Peak=%.*f | Intended distance=%.2f | SL=%.*f | TP=%.*f",
+         ticket,
+         ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
+         ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+         positionProfit,
+         digits,
+         ModeTrailPeakPrice,
+         trailingDistance,
+         digits,
+         newSL,
+         digits,
+         newTP
+      );
    }
 }
 
@@ -1984,45 +1834,68 @@ bool EnforceAegisTrailGraceLoss()
    if(!ModeTrailGraceActive)
       return false;
 
-   if(TimeCurrent() - ModeTrailGraceStartTime >= AegisTrailGraceSeconds)
-   {
-      ModeTrailGraceActive = false;
-      PrintFormat(
-         "AEGIS TRAIL GRACE ENDED | Ticket=%I64u | Grace=%d sec",
-         ModeTrailGraceTicket,
-         AegisTrailGraceSeconds
-      );
-      return false;
-   }
-
    if(ModeTrailGraceTicket == 0 ||
       !PositionSelectByTicket(ModeTrailGraceTicket) ||
       PositionGetInteger(POSITION_MAGIC) != MagicNumber ||
       PositionGetString(POSITION_SYMBOL) != _Symbol)
    {
-      ModeTrailGraceTicket = 0;
-      ModeTrailActivationTicks = 0;
-      ModeTrailGraceStartTime = 0;
-      ModeTrailGraceStarted = false;
-      ModeTrailGraceActive = false;
-      ModeTrailGraceUsed = false;
+      ResetBasket();
+      SignalAlreadyTraded = true;
       return false;
    }
 
+   double minimumProfit = 0.0;
+   double handoffProfit = 0.0;
+   double trailingDistance = 0.0;
+   GetAegisModeProfitParameters(
+      ModeTrailGraceMode,
+      minimumProfit,
+      handoffProfit,
+      trailingDistance
+   );
+
    double positionProfit = PositionGetDouble(POSITION_PROFIT);
-   if(positionProfit > -AegisTrailGraceMaxLoss)
+   if(!ModeTrailGraceExitPending &&
+      TimeCurrent() - ModeTrailGraceStartTime >= AegisTrailGraceSeconds)
+   {
+      ModeTrailGraceExitPending = true;
+      ModeTrailGraceTimedOut = true;
+   }
+
+   if(!ModeTrailGraceExitPending && positionProfit >= handoffProfit)
+   {
+      ModeTrailGraceActive = false;
+      ModeTrailHighProfitReached = true;
+      PrintFormat(
+         "AEGIS HIGH-PROFIT HANDOFF | Ticket=%I64u | Mode=%s | Profit=%.2f | Trail=%.2f price units | TP=$%.2f",
+         ModeTrailGraceTicket,
+         ModeTrailGraceMode == PROFIT_MODE_RUNNER ? "RUNNER" :
+         ModeTrailGraceMode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+         positionProfit,
+         trailingDistance,
+         BasketTP
+      );
+      return false;
+   }
+
+   if(!ModeTrailGraceExitPending &&
+      positionProfit <= -AegisTrailGraceMaxLoss)
+      ModeTrailGraceExitPending = true;
+
+   if(!ModeTrailGraceExitPending)
       return false;
 
    bool closed = trade.PositionClose(ModeTrailGraceTicket);
    uint retcode = trade.ResultRetcode();
-
    if(!closed || retcode != TRADE_RETCODE_DONE)
    {
       PrintFormat(
-         "AEGIS GRACE LOSS EXIT FAILED | Ticket=%I64u | Profit=%.2f | Limit=-%.2f | Retcode=%u | %s",
+         "AEGIS GRACE EXIT FAILED | Ticket=%I64u | Reason=%s | Profit=%.2f | Retcode=%u | %s",
          ModeTrailGraceTicket,
+         ModeTrailGraceTimedOut
+            ? "grace expired before handoff"
+            : "software loss limit",
          positionProfit,
-         AegisTrailGraceMaxLoss,
          retcode,
          trade.ResultRetcodeDescription()
       );
@@ -2030,12 +1903,16 @@ bool EnforceAegisTrailGraceLoss()
    }
 
    PrintFormat(
-      "AEGIS GRACE LOSS LIMIT HIT | Ticket=%I64u | Profit=%.2f | Limit=-%.2f",
+      "AEGIS GRACE EXIT | Ticket=%I64u | Reason=%s | Profit=%.2f | Grace=%d sec",
       ModeTrailGraceTicket,
+      ModeTrailGraceTimedOut
+         ? "grace expired before handoff"
+         : "software loss limit",
       positionProfit,
-      AegisTrailGraceMaxLoss
+      AegisTrailGraceSeconds
    );
    ResetBasket();
+   SignalAlreadyTraded = true;
    return true;
 }
 
@@ -2064,6 +1941,14 @@ ModeTrailActivationTicks = 0;
 ModeTrailGraceStartTime = 0;
 ModeTrailGraceStarted = false;
 ModeTrailGraceActive = false;
+ModeTrailGraceExitPending = false;
+ModeTrailGraceTimedOut = false;
+ModeTrailGraceUsed = false;
+ModeTrailGraceStopWarningPrinted = false;
+ModeTrailPeakPrice = 0.0;
+ModeTrailVirtualStop = 0.0;
+ModeTrailMinimumReached = false;
+ModeTrailHighProfitReached = false;
 
 GraceTimerStarted  = false;
 GraceTimerFinished = false;
@@ -2186,7 +2071,8 @@ if(!ProfitModePrintInitialized ||
    // RECOVERY EXIT
    //==================================================
 
-   if(!ModeTrailGraceUsed &&
+   if(!ModeTrailMinimumReached &&
+      !ModeTrailGraceUsed &&
       TwoDollarDrawdownReached &&
       profit > -0.50)
    {
@@ -2594,7 +2480,8 @@ if(!ProfitModePrintInitialized ||
    // WORKS IN ALL THREE MODES
    //==================================================
 
-   if(!ModeTrailGraceUsed &&
+   if(!ModeTrailMinimumReached &&
+      !ModeTrailGraceUsed &&
       RecoveryTimerStarted)
    {
       //==============================================
@@ -5627,6 +5514,8 @@ if(BasketDirection != 0 &&
    return;
 }
 
+ManageModeTrailingSL();
+RetryFixedSL();
 CheckSmartProfitLock();
 
 //==================================================
@@ -5653,9 +5542,6 @@ if(BasketDirection != 0)
    }
 }
 
-// AEGIS MODE-BASED TRAILING SL
-RetryFixedSL();
-ManageModeTrailingSL();
 int cross = DetectCross();
 
  //--- STEP 1: Detect cross DURING any forming candle (every tick)
