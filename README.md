@@ -90,27 +90,25 @@ Aeonix's current protection emphasis is a real broker-side SL attached to the en
 
 ### Aegis-mode trailing SL
 
-The mode-based trailing stop updates the broker's position SL and does not loosen an existing stop:
+Profit management now uses a staged handoff. The mode is captured when its minimum-profit stage is reached, and the broker SL is never loosened:
 
-| Mode | Trailing activation | Intended trailing distance |
-|---|---:|---:|
-| **Runner** | $0.20 open position profit | 0.50 price units |
-| **Normal** | $0.15 open position profit | 0.35 price units |
-| **Tight** | $0.15 open position profit | 0.25 price units |
+| Mode | Minimum-profit stage | Grace starts at | High-profit handoff | Handoff trailing distance |
+|---|---:|---:|---:|---:|
+| **Runner** | $0.20 | $0.40 | $0.90 | 0.50 price units |
+| **Normal** | $0.15 | $0.30 | $0.80 | 0.40 price units |
+| **Tight** | $0.15 | $0.30 | $0.80 | 0.30 price units |
 
-**Runner clarification:** $0.20 is the open-profit activation threshold that starts trailing. It is not a promise that the stop locks exactly $0.20 of profit. The 0.50 figure is a price distance, not a dollar amount. Broker stop/freeze rules may widen the effective distance.
+The trail distance is in **price units**, not dollars. Broker stop/freeze limits may force a wider effective distance. The default `AegisModeLockLoss` is $1.00; it is a monetary stop amount, not a guaranteed fill price.
 
-### Profit confirmation and reversal grace
+### Staged profit management
 
-The current version adds a short grace after a mode's trailing activation:
+1. At the mode's minimum-profit stage, Aeonix attempts to move the broker SL to represent a maximum $1.00 loss from entry. No trailing starts yet. A software loss check also enforces that limit if the broker rejects or delays the stop update.
+2. On the first tick at twice the mode minimum, Aeonix starts **one 45-second grace per position**: Runner at $0.40; Normal and Tight at $0.30. It attempts to remove the broker SL and watches position profit in software for the configured **-$0.40** loss limit.
+3. If profit reaches the high-profit handoff during grace—Runner $0.90; Normal/Tight $0.80—the grace ends immediately. Aeonix starts a broker-side trailing SL using the table above and keeps the configured **$3.00 TP**.
+4. If 45 seconds expires before the high-profit handoff, Aeonix attempts to close immediately. A software loss-limit breach also triggers an immediate close attempt. The grace can happen only once for a position.
+5. After handoff, the SL trails on every available tick without loosening. If the broker cannot accept an update, the EA logs the failure and retries on later ticks.
 
-1. As soon as position profit reaches its mode's activation threshold, the broker-side trailing SL is recalculated on every tick, subject to broker stop/freeze restrictions.
-2. The EA starts a **45-second grace** after profit reaches **twice** the mode's activation threshold on **two consecutive ticks**: Runner at $0.40; Normal and Tight at $0.30.
-3. During grace, the EA tracks the favorable-price peak and intended trailing level on every tick, while moving the broker-side SL to the configured **-$0.40 monetary loss level** so the regular tight trail does not close the trade on an ordinary pullback.
-4. If position profit reaches **-$0.40 during grace**, the EA attempts to close the position. This is not a guaranteed fill price: fast moves, gaps, spread, or broker stop/freeze restrictions can cause an earlier or larger loss. The EA logs when the broker prevents the grace SL update.
-5. After 45 seconds, the EA restores the trailing level derived from the best favorable price observed during grace. If that level has already been crossed, it attempts to close immediately; otherwise, normal per-tick mode trailing continues.
-
-Once this grace has started, the legacy recovery-timer / drawdown-recovery exits are suppressed for the basket so they do not preempt the grace loss cap or the post-grace trailing exit. The existing **300-second maximum-hold exit** and configured basket / monetary stop targets remain enabled and can still close a position independently.
+While grace is active, the -$0.40 loss check and 45-second timeout are software-managed. If SL removal is rejected, the existing stop may close the position earlier. If MetaTrader is disconnected, the EA is not running, ticks stop, or a close is rejected, the actual result can differ from the threshold. This period requires particular care and demo testing.
 
 ### Other coded protections and exits
 
@@ -121,8 +119,9 @@ Reviewed source defaults and checks include:
 - `BasketSL`: $2.00, subject to the source's hold-time and symbol-specific conditions.
 - `EmergencySL`: $3.00 after a 60-second minimum trade age for applicable symbols.
 - `TradeSLMoney`: $2.00 per-position monetary stop target.
+- `AegisModeLockLoss`: $1.00 per-position stop target after the mode minimum-profit stage.
 - A five-minute (300-second) maximum-hold exit for an open position.
-- A 45-second trailing-activation grace with a -$0.40 software loss limit.
+- A one-time 45-second pre-handoff grace with a -$0.40 software loss limit.
 - Recovery-related state and exit handling.
 
 These are configurable/source defaults, not recommended account settings. The EA has symbol-specific branches; users should check the current source and test on their broker and instrument.
