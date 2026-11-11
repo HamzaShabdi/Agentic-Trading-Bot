@@ -131,7 +131,7 @@ input group "=== PROFIT TARGETS ==="
 input double BasketTP      = 3.0;    // Close all when total profit reaches ($)
 input double BasketSL      = 2.0;    // Close all when total loss reaches ($)
 input double EmergencySL = 3.0;   // Hard stop, ignores hold time
-
+input double FixedSLDistance = 2.0; // Fixed SL distance in price units
 
 input int RSIPeriod = 14;
 input double BuyMomentumLevel = 55.0;
@@ -174,12 +174,10 @@ bool GraceTimerActive = false;
 datetime GraceStartTime = 0;
 bool GraceTimerStarted = false;
 bool GraceTimerFinished = false;
-bool HighProfitMode = false;\
+bool HighProfitMode = false;
 bool Trade40SecExtension = false;
 datetime Trade40SecStartTime = 0;
 input int ExtraTradeSeconds = 40;
-bool Loss40SecExtension = false;
-datetime Loss40SecStartTime = 0;
 bool CrossSeenThisCandle = false;
 string HAFSSignalSymbol="";
 datetime CrossCandleTime = 0;
@@ -266,6 +264,7 @@ double RecoveryTriggerProfit = 0.10;
 int RecoveryTimerSeconds = 120;
 bool RecoveryReached = false;
 bool HadDeepDrawdown = false;
+input double TradeSLMoney = 2.00;
 //+------------------------------------------------------------------+
 //| Init                                                             |
 //+------------------------------------------------------------------+
@@ -302,8 +301,7 @@ int OnInit()
 
    LastBarTime = iTime(_Symbol, PERIOD_M5, 0);
 
-   // Check OnTimer every 10 milliseconds
-   EventSetMillisecondTimer(10);
+  
 
    return INIT_SUCCEEDED;
 }
@@ -313,138 +311,14 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   EventKillTimer();
+   
 
    IndicatorRelease(MA200Handle);
    IndicatorRelease(MA5Handle);
    IndicatorRelease(MA20Handle);
    IndicatorRelease(RSIHandle);
 }
-void OnTimer()
-{
-   if(!ExecutionArmed || !FinalCalculationReady)
-      return;
 
-   //==================================================
-   // CURRENT TICK
-   //==================================================
-
-   MqlTick execTick;
-
-   if(!SymbolInfoTick(_Symbol, execTick))
-      return;
-
-   long nowServerMs =
-      (long)execTick.time_msc;
-
-   long signalStartMs =
-      (long)SignalCandleTime * 1000;
-
-   long candleAgeMs =
-      nowServerMs - signalStartMs;
-
-   double candleAgeSec =
-      candleAgeMs / 1000.0;
-
-   //==================================================
-   // HARD EXECUTION WINDOW
-   // 300.100 SEC -> 300.300 SEC
-   //==================================================
-
-   if(candleAgeMs < 300100)
-      return;
-
-   if(candleAgeMs > 300300)
-   {
-      PrintFormat(
-         "EXECUTION MISSED -> CANDLE AGE=%.3f SEC",
-         candleAgeSec
-      );
-
-      CrossDetected         = false;
-      FinalCalculationReady = false;
-      ExecutionArmed        = false;
-
-      ExecutionTargetMs       = 0;
-      ExecutionTargetServerMs = 0;
-      SignalCandleTime        = 0;
-      FinalDirection          = 0;
-
-      return;
-   }
-
-   //==================================================
-   // ACTUAL TRADE EXECUTION
-   //==================================================
-
-   PrintFormat(
-      "FINAL EXECUTION -> CANDLE AGE=%.3f SEC",
-      candleAgeSec
-   );
-
-   if(FinalDirection == 1)
-   {
-      PrintFormat(
-         "ORDER SEND -> CANDLE AGE=%.3f SEC",
-         candleAgeSec
-      );
-
-      Print("EXECUTING FROZEN BUY");
-
-      ExecuteBuyTrade();
-   }
-   else if(FinalDirection == -1)
-   {
-      PrintFormat(
-         "ORDER SEND -> CANDLE AGE=%.3f SEC",
-         candleAgeSec
-      );
-
-      Print("EXECUTING FROZEN SELL");
-
-      ExecuteSellTrade();
-   }
-   else
-   {
-      Print("EXECUTION BLOCKED -> FROZEN DIRECTION UNKNOWN");
-
-      CrossDetected         = false;
-      FinalCalculationReady = false;
-      ExecutionArmed        = false;
-
-      ExecutionTargetMs       = 0;
-      ExecutionTargetServerMs = 0;
-      SignalCandleTime        = 0;
-      FinalDirection          = 0;
-
-      return;
-   }
-
-   //==================================================
-   // RESET AFTER ORDER ATTEMPT
-   //==================================================
-
-   if(PositionSelect(_Symbol))
-   {
-      PrintFormat(
-         "POSITION CONFIRMED -> OPEN AGE=%.3f SEC",
-         candleAgeSec
-      );
-
-      CrossDetected         = false;
-      FinalCalculationReady = false;
-      ExecutionArmed        = false;
-
-      ExecutionTargetMs       = 0;
-      ExecutionTargetServerMs = 0;
-      SignalCandleTime        = 0;
-      FinalDirection          = 0;
-   }
-   else
-   {
-      Print("ORDER NOT CONFIRMED -> KEEPING EXECUTION ARMED");
-   }
-}
 //+------------------------------------------------------------------+
 //| Trend: 1=up, -1=down, 0=mixed                                   |
 //+------------------------------------------------------------------+
@@ -1405,6 +1279,361 @@ void CloseAllTrades()
    }
 }
 
+bool EnforceMoneyStopLoss()
+{
+   if(TradeSLMoney <= 0.0)
+      return false;
+
+   bool stopTriggered = false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber ||
+         PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+
+      if(positionProfit > -TradeSLMoney)
+         continue;
+
+      stopTriggered = true;
+
+      bool closed = trade.PositionClose(ticket);
+      uint retcode = trade.ResultRetcode();
+
+      if(!closed || retcode != TRADE_RETCODE_DONE)
+      {
+         PrintFormat(
+            "MONEY SL CLOSE FAILED | Ticket=%I64u | Profit=%.2f | Target=-%.2f | Retcode=%u | %s",
+            ticket,
+            positionProfit,
+            TradeSLMoney,
+            retcode,
+            trade.ResultRetcodeDescription()
+         );
+      }
+      else
+      {
+         PrintFormat(
+            "MONEY SL HIT | Ticket=%I64u | Profit=%.2f | Limit=-%.2f",
+            ticket,
+            positionProfit,
+            TradeSLMoney
+         );
+      }
+   }
+
+   if(!stopTriggered)
+      return false;
+
+   bool hasOpenPosition = false;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket != 0 && PositionSelectByTicket(ticket) &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         hasOpenPosition = true;
+         break;
+      }
+   }
+
+   if(!hasOpenPosition)
+      ResetBasket();
+
+   return true;
+}
+
+
+
+void RetryFixedSL()
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+
+   if(tickValue <= 0.0)
+      tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+
+   if(point <= 0.0 || tickSize <= 0.0 ||
+      tickValue <= 0.0 || TradeSLMoney <= 0.0)
+      return;
+
+   int stopsLevel =
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+   int freezeLevel =
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   double minDistance =
+      MathMax(stopsLevel, freezeLevel) * point + tickSize;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double oldTP = PositionGetDouble(POSITION_TP);
+
+      if(entry <= 0.0 || volume <= 0.0)
+         continue;
+
+      // Calculate the $2 risk distance from ORIGINAL ENTRY.
+      double slDistance =
+         (TradeSLMoney / (tickValue * volume)) * tickSize;
+
+      double newSL = 0.0;
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         // BUY SL: below original entry.
+         newSL = MathCeil((entry - slDistance) / tickSize) * tickSize;
+
+         // Never loosen an existing SL.
+         if(oldSL > 0.0 && newSL <= oldSL)
+            continue;
+
+         // Wait until broker permits the entry-based $2 SL.
+         if(tick.bid - newSL < minDistance)
+            continue;
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         // SELL SL: above original entry.
+         newSL = MathFloor((entry + slDistance) / tickSize) * tickSize;
+
+         // Never loosen an existing SL.
+         if(oldSL > 0.0 && newSL >= oldSL)
+            continue;
+
+         // Wait until broker permits the entry-based $2 SL.
+         if(newSL - tick.ask < minDistance)
+            continue;
+      }
+      else
+         continue;
+
+      newSL = NormalizeDouble(newSL, digits);
+
+      bool modified = trade.PositionModify(ticket, newSL, oldTP);
+
+      uint retcode = trade.ResultRetcode();
+
+      if(!modified || retcode != TRADE_RETCODE_DONE)
+      {
+         PrintFormat(
+            "2 DOLLAR SL RETRY FAILED | Ticket=%I64u | Retcode=%u | %s",
+            ticket,
+            retcode,
+            trade.ResultRetcodeDescription()
+         );
+      }
+      else
+      {
+         PrintFormat(
+            "2 DOLLAR ENTRY SL UPDATED | Ticket=%I64u | Entry=%.*f | SL=%.*f | TARGET LOSS=%.2f",
+            ticket,
+            digits,
+            entry,
+            digits,
+            newSL,
+            TradeSLMoney
+         );
+      }
+   }
+}
+
+
+
+//==================================================
+// AEGIS MODE-BASED TRAILING STOP LOSS
+//==================================================
+
+
+
+void ManageModeTrailingSL()
+{
+   if(BasketDirection == 0)
+      return;
+
+   AegisProfitMode mode = GetAegisProfitMode();
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   double tickSize =
+      SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   double point =
+      SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   if(tickSize <= 0.0 || point <= 0.0)
+      return;
+
+   int digits =
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   double stopLevel =
+      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+   double freezeLevel =
+      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
+
+   double minimumDistance =
+      MathMax(stopLevel, freezeLevel) + tickSize;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+
+      double trailingPriceDistance = 0.0;
+      double activationProfit = 0.0;
+
+      if(mode == PROFIT_MODE_RUNNER)
+      {
+         activationProfit = 0.20;
+         trailingPriceDistance = 0.50;
+      }
+      else if(mode == PROFIT_MODE_NORMAL)
+      {
+         activationProfit = 0.15;
+         trailingPriceDistance = 0.35;
+      }
+      else if(mode == PROFIT_MODE_TIGHT)
+      {
+         activationProfit = 0.15;
+         trailingPriceDistance = 0.25;
+      }
+
+      if(positionProfit < activationProfit)
+         continue;
+
+      // Use intended distance unless broker requires a wider distance.
+      double effectiveDistance =
+         MathMax(trailingPriceDistance, minimumDistance);
+
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+
+      double newSL = 0.0;
+
+      // BUY trailing.
+      if(type == POSITION_TYPE_BUY)
+      {
+         newSL = tick.bid - effectiveDistance;
+
+         // Round downward to a valid tick.
+         newSL = MathFloor(newSL / tickSize) * tickSize;
+         newSL = NormalizeDouble(newSL, digits);
+
+         if(tick.bid - newSL < minimumDistance)
+            continue;
+
+         // Never loosen BUY SL.
+         if(currentSL > 0.0 && newSL <= currentSL)
+            continue;
+      }
+
+      // SELL trailing.
+      else if(type == POSITION_TYPE_SELL)
+      {
+         newSL = tick.ask + effectiveDistance;
+
+         // Round upward to a valid tick.
+         newSL = MathCeil(newSL / tickSize) * tickSize;
+         newSL = NormalizeDouble(newSL, digits);
+
+         if(newSL - tick.ask < minimumDistance)
+            continue;
+
+         // Never loosen SELL SL.
+         if(currentSL > 0.0 && newSL >= currentSL)
+            continue;
+      }
+      else
+         continue;
+
+      bool modified =
+         trade.PositionModify(ticket, newSL, currentTP);
+
+      uint retcode = trade.ResultRetcode();
+
+      if(modified && retcode == TRADE_RETCODE_DONE)
+      {
+         double actualDistance =
+            type == POSITION_TYPE_BUY
+            ? tick.bid - newSL
+            : newSL - tick.ask;
+
+         PrintFormat(
+            "AEGIS TRAILING UPDATED | Ticket=%I64u | Mode=%s | Profit=%.2f | IntendedPriceDistance=%.5f | ActualDistance=%.5f | SL=%.*f",
+            ticket,
+            mode == PROFIT_MODE_RUNNER ? "RUNNER" :
+            mode == PROFIT_MODE_TIGHT ? "TIGHT" : "NORMAL",
+            positionProfit,
+            trailingPriceDistance,
+            actualDistance,
+            digits,
+            newSL
+         );
+      }
+      else
+      {
+         PrintFormat(
+            "AEGIS TRAILING FAILED | Ticket=%I64u | Retcode=%u | %s",
+            ticket,
+            retcode,
+            trade.ResultRetcodeDescription()
+         );
+      }
+   }
+}
+
+
 //+------------------------------------------------------------------+
 //| Reset all basket state after close                               |
 //+------------------------------------------------------------------+
@@ -1438,8 +1667,6 @@ RecoveryTimerStarted = false;
 
 RecoveryStartTime = 0;
 HadDeepDrawdown = false;
-Loss40SecExtension = false;
-Loss40SecStartTime = 0;
 TwoDollarDrawdownReached = false;
 }
 
@@ -1563,7 +1790,7 @@ if(!ProfitModePrintInitialized ||
    }
 
 
-   //==================================================
+/*   //==================================================
    // 180 SECOND HARD SL
    //==================================================
 
@@ -1581,7 +1808,7 @@ if(!ProfitModePrintInitialized ||
       SignalAlreadyTraded = true;
 
       return;
-   }
+   } */
 
 
    //==================================================
@@ -1635,7 +1862,7 @@ if(!ProfitModePrintInitialized ||
       );
    }
 
-
+/*
    //==================================================
    // UPDATE PEAK
    //==================================================
@@ -1932,7 +2159,7 @@ if(!ProfitModePrintInitialized ||
                GraceProtectedProfit
             );
          }
-      }
+      } 
 
 
       //==============================================
@@ -1946,7 +2173,7 @@ if(!ProfitModePrintInitialized ||
             SmartProfitLock = GraceProtectedProfit;
       }
    }
-
+*/
 
    //==================================================
    // RECOVERY TIMER
@@ -2023,57 +2250,6 @@ if(!ProfitModePrintInitialized ||
 
 
    //==================================================
-   // 5 MINUTE CHECK
-   //==================================================
-
-   if(!Loss40SecExtension &&
-      TimeCurrent() - TradeOpenTime >= 300)
-   {
-      if(profit > 0)
-      {
-         PrintFormat(
-            "5 MIN PROFIT CLOSE >>> Profit=%.2f",
-            profit
-         );
-
-         CloseAllTrades();
-         ResetBasket();
-
-         SignalAlreadyTraded = true;
-
-         return;
-      }
-
-      Loss40SecExtension = true;
-      Loss40SecStartTime = TimeCurrent();
-
-      Print("5 MIN LOSS - 30 SEC EXTENSION STARTED");
-
-      return;
-   }
-
-
-   //==================================================
-   // 30 SECOND EXTENSION
-   //==================================================
-
-   if(Loss40SecExtension)
-   {
-      if(TimeCurrent() - Loss40SecStartTime >= 30)
-      {
-         Print("30 SEC EXTENSION FINISHED - FORCE CLOSE");
-
-         CloseAllTrades();
-         ResetBasket();
-
-         SignalAlreadyTraded = true;
-
-         return;
-      }
-   }
-
-
-   //==================================================
    // GRACE TIMER EXPIRY
    // ONLY NORMAL + TIGHT
    //==================================================
@@ -2097,7 +2273,7 @@ if(!ProfitModePrintInitialized ||
    }
 
 
-   //==================================================
+/*   //==================================================
    // SMART PROFIT LOCK
    //==================================================
 
@@ -2174,7 +2350,9 @@ if(!ProfitModePrintInitialized ||
       SignalAlreadyTraded = true;
 
       return;
-   }
+  } */ 
+  
+   
 }
 
 
@@ -4013,6 +4191,9 @@ break;
 
 }
 }
+
+
+
 bool CalculateBrokerSLTP(
    bool isBuy,
    double entryPrice,
@@ -4021,7 +4202,9 @@ bool CalculateBrokerSLTP(
    double &tpPrice
 )
 {
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickValueLoss = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
    double tickValueProfit = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_PROFIT);
@@ -4032,11 +4215,12 @@ bool CalculateBrokerSLTP(
    if(tickValueProfit <= 0.0)
       tickValueProfit = tickValue;
 
-   if(tickSize <= 0.0 ||
+   if(point <= 0.0 ||
+      tickSize <= 0.0 ||
       tickValueLoss <= 0.0 ||
       tickValueProfit <= 0.0 ||
       volume <= 0.0 ||
-      BasketSL <= 0.0 ||
+      TradeSLMoney <= 0.0 ||
       BasketTP <= 0.0 ||
       entryPrice <= 0.0)
    {
@@ -4044,41 +4228,78 @@ bool CalculateBrokerSLTP(
       return false;
    }
 
-   // Convert the monetary SL/TP targets into price distances.
+   //==================================================
+   // INITIAL $2 MONETARY SL FROM ORIGINAL ENTRY
+   //==================================================
+
    double slDistance =
-      (BasketSL / (tickValueLoss * volume)) * tickSize;
+      (TradeSLMoney / (tickValueLoss * volume)) * tickSize;
+
+   //==================================================
+   // BROKER STOP AND FREEZE RESTRICTIONS
+   //==================================================
+
+   long stopsLevel =
+      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+   long freezeLevel =
+      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   double brokerMinDistance =
+      MathMax(stopsLevel, freezeLevel) * point;
+
+   MqlTick currentTick;
+   if(!SymbolInfoTick(_Symbol, currentTick))
+   {
+      Print("SL/TP CALCULATION FAILED: Current tick unavailable.");
+      return false;
+   }
+
+   double safeBrokerDistance = brokerMinDistance + tickSize;
+
+   // Find the closest legal stop from the live closing-side quote.
+   double requiredSLDistance = isBuy
+      ? entryPrice - currentTick.bid + safeBrokerDistance
+      : currentTick.ask - entryPrice + safeBrokerDistance;
+
+   slDistance = MathMax(slDistance, MathMax(0.0, requiredSLDistance));
+
+   //==================================================
+   // BASKET TAKE PROFIT CALCULATION
+   //==================================================
 
    double tpDistance =
       (BasketTP / (tickValueProfit * volume)) * tickSize;
 
-   // Respect the broker's minimum stop distance.
-   long stopsLevel =
-      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double requiredTPDistance = isBuy
+      ? currentTick.bid - entryPrice + safeBrokerDistance
+      : entryPrice - currentTick.ask + safeBrokerDistance;
 
-   double minDistance = stopsLevel * _Point;
+   tpDistance = MathMax(tpDistance, MathMax(0.0, requiredTPDistance));
 
-   // Add one tick as a small safety buffer.
-   minDistance += tickSize;
-
-   if(slDistance < minDistance)
-      slDistance = minDistance;
-
-   if(tpDistance < minDistance)
-      tpDistance = minDistance;
+   //==================================================
+   // CALCULATE SL AND TP FROM ORIGINAL ENTRY
+   //==================================================
 
    if(isBuy)
    {
-      // Round outward to valid tick-size increments.
-      slPrice = MathFloor((entryPrice - slDistance) / tickSize) * tickSize;
-      tpPrice = MathCeil ((entryPrice + tpDistance) / tickSize) * tickSize;
+      slPrice =
+         MathCeil((entryPrice - slDistance) / tickSize) * tickSize;
+
+      tpPrice =
+         MathCeil((entryPrice + tpDistance) / tickSize) * tickSize;
    }
    else
    {
-      slPrice = MathCeil ((entryPrice + slDistance) / tickSize) * tickSize;
-      tpPrice = MathFloor((entryPrice - tpDistance) / tickSize) * tickSize;
+      slPrice =
+         MathFloor((entryPrice + slDistance) / tickSize) * tickSize;
+
+      tpPrice =
+         MathFloor((entryPrice - tpDistance) / tickSize) * tickSize;
    }
 
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   int digits =
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
    slPrice = NormalizeDouble(slPrice, digits);
    tpPrice = NormalizeDouble(tpPrice, digits);
@@ -4090,15 +4311,23 @@ bool CalculateBrokerSLTP(
    }
 
    PrintFormat(
-      "BROKER SL/TP CALCULATED | SL=%.5f | TP=%.5f | SL TARGET=$%.2f | TP TARGET=$%.2f",
+      "INITIAL ENTRY-BASED SL/TP | SL=%.*f | TP=%.*f | SL DISTANCE=%.5f | TARGET LOSS=$%.2f | BROKER MIN=%.5f | STOPS=%d | FREEZE=%d",
+      digits,
       slPrice,
+      digits,
       tpPrice,
-      BasketSL,
-      BasketTP
+      slDistance,
+      TradeSLMoney,
+      brokerMinDistance,
+      (int)stopsLevel,
+      (int)freezeLevel
    );
 
    return true;
 }
+
+
+
 void ExecuteBuyTrade()
 {
 
@@ -4463,7 +4692,7 @@ void AegisFinalDecision(int direction)
 
       case BUY5:
 
-         if(direction == -1)
+         if(direction == 1)
             tradeType = TRADE_TREND;
          else
             tradeType = TRADE_REVERSAL;
@@ -4472,7 +4701,7 @@ void AegisFinalDecision(int direction)
 
       case BUY6:
 
-         if(direction == -1)
+         if(direction == 1)
             tradeType = TRADE_TREND;
          else
             tradeType = TRADE_REVERSAL;
@@ -4481,7 +4710,7 @@ void AegisFinalDecision(int direction)
 
       case SELL5:
 
-         if(direction == 1)
+         if(direction == -1)
             tradeType = TRADE_TREND;
          else
             tradeType = TRADE_REVERSAL;
@@ -4490,7 +4719,7 @@ void AegisFinalDecision(int direction)
 
       case SELL6:
 
-         if(direction == 1)
+         if(direction == -1)
             tradeType = TRADE_TREND;
          else
             tradeType = TRADE_REVERSAL;
@@ -4918,9 +5147,99 @@ if(newBar)
 }
 
 
-   double profit = GetBasketProfit();
-   CheckSmartProfitLock();
-   int cross = DetectCross();
+  double profit = GetBasketProfit();
+
+if(EnforceMoneyStopLoss())
+   return;
+
+if(BasketDirection != 0 &&
+   TradeOpenTime > 0 &&
+   TimeCurrent() - TradeOpenTime >= 300)
+{
+   PrintFormat(
+      "5 MINUTE TIME EXIT >>> Profit=%.2f | OpenTime=%s",
+      GetBasketProfit(),
+      TimeToString(TradeOpenTime, TIME_DATE | TIME_SECONDS)
+   );
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber ||
+         PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      bool closed = trade.PositionClose(ticket);
+      uint retcode = trade.ResultRetcode();
+
+      if(!closed || retcode != TRADE_RETCODE_DONE)
+      {
+         PrintFormat(
+            "5 MINUTE TIME EXIT FAILED | Ticket=%I64u | Retcode=%u | %s",
+            ticket,
+            retcode,
+            trade.ResultRetcodeDescription()
+         );
+      }
+   }
+
+   bool hasOpenPosition = false;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket != 0 && PositionSelectByTicket(ticket) &&
+         PositionGetInteger(POSITION_MAGIC) == MagicNumber &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         hasOpenPosition = true;
+         break;
+      }
+   }
+
+   if(!hasOpenPosition)
+   {
+      ResetBasket();
+      SignalAlreadyTraded = true;
+   }
+
+   return;
+}
+
+CheckSmartProfitLock();
+
+//==================================================
+// BASKET TAKE PROFIT — +3.00
+//==================================================
+
+if(BasketDirection != 0)
+{
+   double liveBasketProfit = GetBasketProfit();
+
+   if(liveBasketProfit >= BasketTP)
+   {
+      PrintFormat(
+         "BASKET TAKE PROFIT HIT >>> Profit=%.2f | Target=%.2f",
+         liveBasketProfit,
+         BasketTP
+      );
+
+      CloseAllTrades();
+      ResetBasket();
+      SignalAlreadyTraded = true;
+
+      return;
+   }
+}
+
+// AEGIS MODE-BASED TRAILING SL
+RetryFixedSL();
+ManageModeTrailingSL();
+int cross = DetectCross();
 
  //--- STEP 1: Detect cross DURING any forming candle (every tick)
    //    Record which direction the cross is happening
@@ -4966,6 +5285,7 @@ bool ma200Below = (ma5now[0] > ma200now[0] || ma20now[0] > ma200now[0]);
    
 
 CrossDetected      = true;
+FinalCalculationReady = false;
 CrossSeenThisCandle = true;
 HAFSSignalSymbol   = _Symbol;
 CrossDirection     = 1;
@@ -5013,7 +5333,8 @@ LastCrossTime = TimeCurrent();
 {
    Print("SELL CROSS DETECTED");
 
-  CrossDetected      = true;
+CrossDetected      = true;
+FinalCalculationReady = false;
 CrossSeenThisCandle = true;
 HAFSSignalSymbol   = _Symbol;
 CrossDirection     = -1;
@@ -5266,82 +5587,52 @@ else
 }
 
 //==================================================
-// FREEZE EVERYTHING
+// FREEZE EVERYTHING AND EXECUTE IMMEDIATELY
 //==================================================
 
 FinalCalculationReady = true;
-ExecutionArmed = true;
-
-//==================================================
-// FINAL ORDER SEND TARGET = 299.000 SEC
-// FINAL DIRECTION IS ALREADY FROZEN
-//==================================================
-
-long targetServerMs =
-   signalStartMs + 299100;
-
-long waitMs =
-   targetServerMs - currentServerMs;
-
-if(waitMs <= 0)
-{
-   PrintFormat(
-      "FINAL ORDER TARGET ALREADY PASSED -> AGE=%.3f SEC",
-      candleAgeMs / 1000.0
-   );
-
-   ExecutionArmed = false;
-   FinalCalculationReady = false;
-   return;
-}
-
-//==================================================
-// STORE SERVER-TIME ORDER SEND TARGET
-//==================================================
-
-ExecutionTargetServerMs =
-   targetServerMs;
-
-PrintFormat(
-   "FINAL ORDER TARGET SET -> SERVER AGE=299.100 SEC | WAIT=%I64d ms",
-   waitMs
-);
+ExecutionArmed = false;
 
 PrintFormat(
    "FINAL CALC DONE -> AGE=%.3f SEC",
    candleAgeMs / 1000.0
 );
 
-Print(
-   "EXECUTION ARMED -> ORDER SEND TARGET 299.100 SEC"
+//==================================================
+// IMMEDIATE ORDER EXECUTION
+//==================================================
+
+MqlTick immediateTick;
+
+if(!SymbolInfoTick(_Symbol, immediateTick))
+{
+   Print("IMMEDIATE EXECUTION FAILED -> TICK UNAVAILABLE");
+   return;
+}
+
+PrintFormat(
+   "IMMEDIATE EXECUTION -> CANDLE AGE=%.3f SEC",
+   (immediateTick.time_msc - signalStartMs) / 1000.0
 );
+
+if(FinalDirection == 1)
+{
+   Print("EXECUTING FROZEN BUY IMMEDIATELY");
+   ExecuteBuyTrade();
+}
+else if(FinalDirection == -1)
+{
+   Print("EXECUTING FROZEN SELL IMMEDIATELY");
+   ExecuteSellTrade();
+}
 
 return;
 }
    // Allow new crossover only after MAs separate again
 
 
-   //--- BASKET TAKE PROFIT
-if(BasketDirection != 0)
-{
-   double liveBasketProfit = GetBasketProfit();
+  
 
-   if(liveBasketProfit >= BasketTP)
-   {
-      PrintFormat(
-         "BASKET TP HIT >>> Profit=%.2f | Target=%.2f",
-         liveBasketProfit,
-         BasketTP
-      );
-
-      CloseAllTrades();
-      ResetBasket();
-
-      SignalAlreadyTraded = true;
-
-      return;
-   }
-}
 //================ EMERGENCY STOP LOSS (1 MIN DELAY)
 
 if(!IsOneDollarMarket() &&
