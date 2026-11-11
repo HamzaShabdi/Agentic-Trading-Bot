@@ -1,192 +1,168 @@
-# Aeonix --- Intelligent Market-Analysis Trading EA
+# Aeonix
 
-Aeonix is an experimental MetaTrader 5 Expert Advisor (EA) built around
-staged market analysis, candle-strength evaluation, wick-pattern logic,
-and mode-based trade management. Instead of relying only on a simple
-moving-average crossover to trigger an immediate trade, the design
-evaluates market context and applies additional decision and
-risk-management layers.
+**A context-aware, precision-timed M5 trading Expert Advisor for MetaTrader 5.**
 
-## Project Overview
+Aeonix is an experimental MQL5 Expert Advisor created for the **AgentX hackathon**. It starts with an MA 5 / MA 20 crossover, but does not treat the crossover as a complete trade decision. A directional cross is accepted only when MA 200 is on the corresponding side of both averages. The EA then stages market analysis, candle-pattern and wick checks, a final direction decision, and risk controls around that signal.
 
-Aeonix combines several layers of analysis and trade management:
+> Aeonix is a deterministic, rule-based trading system. “Aegis” and “Phoenix” are names for software decision modules, not trained AI models. Trading involves substantial risk; no profitability or accuracy is guaranteed.
 
--   **AEGIS** --- market-context analysis and decision support.
--   **Phoenix / HAFS** --- candle and wick-pattern evaluation.
--   **Market classification** --- trend, range, breakout, volatility,
-    and behavior states.
--   **Adaptive risk modes** --- Runner, Normal, and Tight.
--   **Smart profit protection** --- mode-aware profit-locking and
-    recovery handling.
+## Why Aeonix is different from a basic SMA EA
 
-The EA is intended for research, development, and testing in MetaTrader
-5. It does not guarantee profitable results.
+A basic SMA crossover EA can enter as soon as its averages cross. Aeonix uses the cross as a **setup trigger**, then evaluates more context before deciding whether and which way to trade:
 
-## What Makes Aeonix Different?
+- **Aegis** assesses market regime, direction, strength, volatility, behavior, bias, and trade-management mode.
+- **Phoenix / HAFS** evaluates a named candle-pattern case and the wick support of the live signal candle and two preceding candles.
+- **Staged calculation** caches context at 290 seconds, then performs final checks and freezes the direction at 298 seconds into the M5 signal candle.
+- **Immediate execution** attempts the order on the first available tick at or after the 298-second decision. It does not intentionally wait for the next candle or 301 seconds.
+- **Explicit stop-loss line**: the entry request includes calculated broker-side SL and TP prices. Aegis-mode trailing can subsequently move the SL in a protective direction.
 
-A conventional crossover strategy may enter as soon as a moving-average
-condition is met. Aeonix adds contextual analysis before a trade
-decision, then applies trade-management rules after entry.
+The design is intended to make a crossover decision more contextual and explainable. Actual accuracy or performance improvements must be established through reproducible testing; they are not assumed here.
 
-### 1. Staged Candle Analysis
+## System at a glance
 
-The source reviewed includes a preprocessing condition around **290
-seconds after candle open**. At that point, it caches values such as:
+| Layer | Responsibility |
+|---|---|
+| Signal | Detect an MA 5 / MA 20 crossover while the M5 candle is forming; require MA 200 below both for BUY or above both for SELL. |
+| Aegis | Classify market context, estimate trend or reversal bias, assess the trade type, and select a protection mode. |
+| Phoenix / HAFS | Route the setup into a candle case, evaluate A/B/C wick support, and pass a direction to Aegis final-decision logic. |
+| Execution | Freeze BUY or SELL at the final calculation stage and submit an order with calculated SL/TP. |
+| Management | Check stop-loss conditions, apply mode-based trailing, and evaluate basket and time-based exits. |
 
--   Market type
--   Trend direction and strength
--   Volatility state
--   Market behavior
--   AEGIS decision and market bias
--   Candle-strength information
--   HAFS preprocessing data
+## Aegis: market context and trade management
 
-Timing depends on the current source implementation and timeframe.
-Confirm the timing logic before describing it as a fixed product
-guarantee.
+Aegis is the context and risk-management layer. It uses several inputs rather than relying solely on the crossover:
 
-### 2. AEGIS --- Market Intelligence
+- **Market type:** the current source classifies conditions as trending or ranging using MA 5, MA 20, and MA 200 alignment. Although a breakout enum exists, the reviewed classification function does not currently return a breakout state.
+- **Trend direction:** buy, sell, or none, based on the coded MA conditions.
+- **Trend strength:** weak, normal, or strong, using MA 5 / MA 20 separation.
+- **Volatility:** low, normal, high, or extreme, based on recent M5 candle ranges. The current thresholds mark range expansion of 1.7x as high and 2.5x as extreme versus the average of prior ranges.
+- **Market behavior:** normal, choppy, momentum, rejection, or unstable.
+- **Decision and bias:** allow, caution, or reject; and trend, reversal, or unknown. These help classify the setup and preferred trade type.
+- **Profit-management mode:** Tight, Normal, or Runner. Strong trend conditions, some strong reversal conditions, and cautionary market states influence the selected mode.
 
-AEGIS is the market-analysis and decision-support layer. The reviewed
-source includes logic for evaluating:
+The exact rules are those implemented in the EA source; this is not a forecast or a guarantee that a market classification will be correct.
 
--   Trending, ranging, and breakout conditions
--   Trend direction and strength
--   Volatility states
--   Normal, choppy, momentum, rejection, and unstable behavior
--   Cached market context used by later decision logic
+## Phoenix / HAFS: pattern and wick reasoning
 
-The goal is to use more than a single indicator signal when evaluating a
-potential setup.
+Phoenix is the name used in the code for the case-specific “mastermind” decision branches. HAFS provides the candle-pattern and wick inputs those branches evaluate.
 
-### 3. Phoenix / HAFS --- Candle and Wick Logic
+### Three-candle context
 
-Phoenix / HAFS adds candle-pattern and wick-based evaluation. The
-reviewed source includes HAFS buy/sell case families, wick confirmation,
-and cached candle data.
+- **A** is the live signal candle.
+- **B** is the immediately preceding candle.
+- **C** is the candle before B.
 
-These checks are intended to help evaluate the shape and context of
-price movement before a trade is taken. Their effectiveness must be
-validated through testing.
+The EA defines **12 base case labels** (BUY 1–6 and SELL 1–6) and **4 reversal variants** (BUY 1 / 4 reversal and SELL 1 / 4 reversal). Case assignment uses bullish and bearish candle-body states across A, B, and C; case-specific logic then evaluates wick support.
 
-## Risk and Trade Management
+### Wick and candle-strength checks
 
-### Runner, Normal, and Tight Modes
+- A lower-wick-dominant signal can support BUY; an upper-wick-dominant signal can support SELL, subject to the configured wick-difference threshold.
+- B and C contribute their own buy/sell wick-support flags.
+- The final case logic combines the A/B/C flags and may resolve in the crossover direction or in the opposite direction.
+- Minimum total wick size and minimum candle-strength thresholds can reject a setup.
+- Source defaults include a 10% wick-difference threshold, a 40% strong-wick threshold, and minimum wick size of 1.0 price unit. These are configurable inputs/values, not universal market standards.
 
-Aeonix includes three named profit/risk-management modes:
+After the case-specific direction is produced, Aegis maps it to a trend or reversal trade type and applies the cached context and preferred-trade logic. The resulting direction is frozen before order submission.
 
--   **Runner** --- designed to manage trades with room for a larger
-    favorable move.
--   **Normal** --- the standard management mode.
--   **Tight** --- designed for more conservative or tightly managed
-    conditions.
+## The 290s → 298s execution window
 
-Market-condition logic can influence the selected mode. Review the
-current source to confirm the precise entry conditions and parameters
-for each mode before documenting them as fixed specifications.
+The signal candle is an M5 candle: 300 seconds in duration. Aeonix uses its final seconds for a staged decision rather than waiting until a later candle.
 
-### Smart Profit Lock
+| Candle age | Stage | Work performed |
+|---:|---|---|
+| Cross detected | Capture setup | Record crossover direction and signal-candle time; save preceding-candle data. |
+| **290 seconds** | Pre-processing | Cache market type, trend direction and strength, volatility, behavior, Aegis decision, market bias, candle strength, and eligible B/C wick/case data. |
+| **298 seconds or later** | Final calculation | On the first available tick at or after 298.000 seconds, recheck candle strength, calculate the live A-candle wick, detect the final HAFS case, and freeze BUY or SELL. |
+| Same eligible tick | Execution attempt | If the final direction is valid and a quote is available, immediately submit the BUY/SELL request with calculated SL and TP. |
 
-The source includes smart profit-lock logic and a `GetAegisProfitMode`
-function. Profit protection behavior can vary according to the active
-management mode.
+This is **tick-driven**, not a timer that guarantees a quote at exactly 298.000 seconds. If no tick arrives at that instant, processing occurs on a later available tick. The intended flow does not wait for 301 seconds or for the next M5 bar.
 
-### Grace Timer and Recovery Logic
+## Stop-loss line and adaptive trailing
 
-The source includes recovery-related state and a **30-second recovery
-timer**. The recovery logic uses a configured profit threshold
-(`RecoveryLock`) when evaluating whether a trade should remain open or
-be closed.
+Aeonix's current protection emphasis is a real broker-side SL attached to the entry, plus mode-based trailing—not a claim that the legacy stepped SmartProfitLock ladder is the active protection mechanism.
 
-Confirm the exact current behavior and threshold values in the latest
-source before publishing detailed claims about trade exits.
+### Entry SL/TP
 
-### Targets and Protective Limits
+- The BUY/SELL request supplies calculated **SL and TP price levels** to the broker.
+- The default `TradeSLMoney` input is **$2.00**; the EA converts that money amount into a price distance using symbol tick values, tick size, and volume.
+- The default `BasketTP` is **$3.00**. Broker minimum stop/freeze distances can require a wider price distance. Fees, slippage, execution, and symbol rules mean actual loss/profit can differ from a configured amount.
+- If an entry-based SL cannot initially be placed within broker limits, the EA also includes per-tick SL retry logic.
 
-The reviewed source contains these default input values:
+### Aegis-mode trailing SL
 
-  Setting           Default value in reviewed source
-  --------------- ----------------------------------
-  `BasketTP`                                   `3.0`
-  `BasketSL`                                   `2.0`
-  `EmergencySL`                                `3.0`
+The mode-based trailing stop updates the broker's position SL and does not loosen an existing stop:
 
-These are source defaults, not guaranteed outcomes. Actual behavior can
-depend on broker execution, symbol specifications, configuration, and
-other EA logic.
-There is 180 sec HoldTime for SL
+| Mode | Trailing activation | Intended trailing distance |
+|---|---:|---:|
+| **Runner** | $0.20 open position profit | 0.50 price units |
+| **Normal** | $0.15 open position profit | 0.35 price units |
+| **Tight** | $0.15 open position profit | 0.25 price units |
 
+**Runner clarification:** $0.20 is the open-profit activation threshold that starts trailing. It is not a promise that the stop locks exactly $0.20 of profit. The 0.50 figure is a price distance, not a dollar amount. Broker stop/freeze rules may widen the effective distance.
 
-## High-Level Workflow
+### Other coded protections and exits
 
-1.  Collect and evaluate recent market data.
-2.  Classify market conditions, trend, volatility, and behavior.
-3.  Cache relevant context during the preprocessing stage.
-4.  Apply AEGIS market analysis and Phoenix / HAFS candle and wick
-    checks.
-5.  Evaluate whether a trade setup meets the EA's conditions.
-6.  Manage an open trade using the applicable risk mode and
-    profit-protection logic.
+Reviewed source defaults and checks include:
 
-This is a high-level description. Exact execution order and conditions
-should be confirmed against the source version submitted with the
-project.
+- `LotSize`: 0.01.
+- `BasketTP`: $3.00.
+- `BasketSL`: $2.00, subject to the source's hold-time and symbol-specific conditions.
+- `EmergencySL`: $3.00 after a 60-second minimum trade age for applicable symbols.
+- `TradeSLMoney`: $2.00 per-position monetary stop target.
+- A five-minute time exit for an open position.
+- Recovery-related state and exit handling.
 
-## Technology Stack
+These are configurable/source defaults, not recommended account settings. The EA has symbol-specific branches; users should check the current source and test on their broker and instrument.
 
--   **Platform:** MetaTrader 5
--   **Language:** MQL5
--   **Artifact:** Expert Advisor (`.mq5`)
+## How Aeonix differs from the earlier SmartProfitLock version
 
-## Testing and Validation
+The Round 1 README described profit-lock logic. The current Aeonix source shifts the protection story toward **visible broker-side SL levels and Aegis-mode trailing**, while adding the staged market-analysis and execution pipeline.
 
-Before using Aeonix on a live account:
+| Earlier project framing | Current Aeonix source |
+|---|---|
+| SmartProfitLock-centered profit management | Calculated SL/TP prices are supplied with the entry request. |
+| Less emphasis on an explicit chart/broker SL | Entry SL is a broker-side price level; fixed-money SL retry and Aegis trailing are also coded. |
+| Crossover plus profit-management focus | Crossover is followed by Aegis context, Phoenix/HAFS cases, and wick/candle-strength checks. |
+| No documented late-candle staged execution in the Round 1 README | 290s pre-processing → 298s final calculation → immediate same-tick execution attempt. |
 
--   Compile the submitted source in MetaEditor and resolve all warnings
-    or errors.
--   Run Strategy Tester backtests across different market conditions.
--   Use out-of-sample periods to reduce the risk of overfitting.
--   Test realistic spreads, commissions, slippage, and broker
-    stop-distance restrictions.
--   Run demo-forward tests and inspect order execution, exits, and
-    recovery behavior.
--   Record test dates, symbols, timeframes, settings, and results.
--   Avoid presenting a backtest or a short demo run as proof of future
-    profitability.
+The previous SmartProfitLock source was not included in the files reviewed for this README, so this is a comparison with the earlier project description, not a line-by-line code diff. In the current snapshot, the legacy stepped SmartProfitLock ladder block is commented out; its name and some state variables remain. The active per-tick trailing function is `ManageModeTrailingSL()`.
 
-## Repository Checklist
+## Configuration and technology
 
-Before making the repository public:
+- **Platform:** MetaTrader 5
+- **Language:** MQL5
+- **Main source:** `Aeonix.mq5`
+- **Timeframe used by the strategy:** M5
+- **Trade API:** MQL5 `CTrade`
+- **Main moving averages:** MA 5, MA 20, and MA 200 (MA 200 is used by market-context logic)
 
--   [ ] Ensure the repository name, README, and EA identity match.
--   [ ] Confirm the `.mq5` header and internal program name use the
-    intended Aeonix name.
--   [ ] Verify timing, hold-time, and recovery claims against the exact
-    submitted source.
--   [ ] Remove account numbers, credentials, private paths, and other
-    sensitive information.
--   [ ] Include a license only if you have chosen the terms under which
-    others may use the code.
--   [ ] Add screenshots or test reports only when they are genuine and
-    accurately labeled.
+The EA exposes configurable values for lot size, wick thresholds, candle-strength threshold, money stop, basket targets, and session filtering. Check the source inputs before running it; defaults are not risk recommendations.
 
-## Hackathon Value Proposition
+## Testing and validation
 
-Aeonix explores a layered trading-EA architecture that combines market
-classification, cached context, candle and wick evaluation, and
-mode-based trade management. The project can be evaluated on the clarity
-of its architecture, reproducibility of its tests, and the quality of
-its risk controls---not on unsupported claims of guaranteed returns.
+Before any live use:
+
+1. Compile the exact submitted `.mq5` source in MetaEditor.
+2. Backtest multiple instruments and market regimes with realistic spread, commission, slippage, and broker stop constraints.
+3. Use out-of-sample data; record the exact EA version, parameters, symbol, timeframe, and dates.
+4. Demo-forward-test the 290s/298s timing, order-request timestamps, rejected setups, SL placement/retries, trailing modifications, and exits.
+5. Measure results such as drawdown, expectancy, win/loss distribution, and trigger-to-order latency. Do not equate a working order pipeline with trading accuracy or profitability.
+6. Never treat a short backtest or demo run as evidence of future returns.
+
+No verified win rate, accuracy improvement, or profitability result is claimed in this repository.
+
+## Hackathon value
+
+Aeonix demonstrates a modular approach to automated trade decisions:
+
+**Aegis reads market context → Phoenix/HAFS evaluates candle cases → direction is frozen → execution and SL/TP management take over.**
+
+The differentiator is not simply “MA 5 crosses MA 20.” The cross is direction-filtered by MA 200 and followed by an explainable, staged pipeline: regime and bias analysis, candle strength, pattern and wick evidence, potential direction reversal, a 290/298-second decision window, and immediate execution on the eligible tick.
 
 ## Disclaimer
 
-Aeonix is provided for educational and experimental purposes. Trading
-financial instruments, including gold and other CFDs, involves
-substantial risk. This repository is not financial advice, and no
-strategy or EA can guarantee profits. Test thoroughly on a demo
-environment and understand the risks before considering live use.
+Aeonix is an experimental software project for education and testing, not financial advice. Trading financial instruments can result in substantial or total loss. Stops do not guarantee a precise exit price during gaps, slippage, or fast markets. Test in MetaTrader 5's Strategy Tester and on a demo account, and understand the risks before considering live trading.
 
 ## License
 
-No license is specified here. Add a `LICENSE` file if you want to define
-how others may use, modify, and distribute this repository.
+No license is specified. Add a `LICENSE` file only after choosing the terms under which others may use, modify, and distribute the project.
