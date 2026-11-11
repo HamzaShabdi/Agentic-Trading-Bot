@@ -213,7 +213,6 @@ bool HAFSCaseDetected = false;
 datetime SignalCandleTime = 0;
 bool FinalCalculationReady = false;
 bool ExecutionArmed = false;
-datetime ExecutionBarTime = 0;
 double GraceProtectedProfit = 0.0;
 ulong ExecutionTargetMs = 0;
 long ExecutionTargetServerMs = 0;
@@ -5257,6 +5256,40 @@ if(newBar)
       CrossSeenThisCandle = false;
 }
 
+if(ExecutionArmed && FinalCalculationReady)
+{
+   MqlTick executionTick;
+   if(!SymbolInfoTick(_Symbol, executionTick))
+   {
+      Print("299 SEC EXECUTION DEFERRED -> TICK UNAVAILABLE");
+      return;
+   }
+
+   long signalCandleAgeMs =
+      executionTick.time_msc - (long)SignalCandleTime * 1000;
+
+   if(signalCandleAgeMs >= 299000)
+   {
+      int frozenDirection = FinalDirection;
+      ExecutionArmed = false;
+
+      PrintFormat(
+         "299 SEC EXECUTION -> SIGNAL CANDLE AGE=%.3f SEC | DIRECTION=%s",
+         signalCandleAgeMs / 1000.0,
+         frozenDirection == 1 ? "BUY" : "SELL"
+      );
+
+      if(frozenDirection == 1)
+         ExecuteBuyTrade();
+      else if(frozenDirection == -1)
+         ExecuteSellTrade();
+      else
+         Print("299 SEC EXECUTION CANCELLED -> NO FROZEN DIRECTION");
+
+      return;
+   }
+}
+
 
   double profit = GetBasketProfit();
 
@@ -5700,44 +5733,15 @@ else
 }
 
 //==================================================
-// FREEZE EVERYTHING AND EXECUTE IMMEDIATELY
+// FREEZE FINAL DIRECTION AND ARM 299-SECOND ENTRY
 //==================================================
-
 FinalCalculationReady = true;
-ExecutionArmed = false;
+ExecutionArmed = true;
 
 PrintFormat(
-   "FINAL CALC DONE -> AGE=%.3f SEC",
+   "FINAL CALC DONE -> AGE=%.3f SEC | ORDER ARMED FOR SIGNAL CANDLE AGE 299 SEC",
    candleAgeMs / 1000.0
 );
-
-//==================================================
-// IMMEDIATE ORDER EXECUTION
-//==================================================
-
-MqlTick immediateTick;
-
-if(!SymbolInfoTick(_Symbol, immediateTick))
-{
-   Print("IMMEDIATE EXECUTION FAILED -> TICK UNAVAILABLE");
-   return;
-}
-
-PrintFormat(
-   "IMMEDIATE EXECUTION -> CANDLE AGE=%.3f SEC",
-   (immediateTick.time_msc - signalStartMs) / 1000.0
-);
-
-if(FinalDirection == 1)
-{
-   Print("EXECUTING FROZEN BUY IMMEDIATELY");
-   ExecuteBuyTrade();
-}
-else if(FinalDirection == -1)
-{
-   Print("EXECUTING FROZEN SELL IMMEDIATELY");
-   ExecuteSellTrade();
-}
 
 return;
 }
