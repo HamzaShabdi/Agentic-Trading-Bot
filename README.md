@@ -100,6 +100,18 @@ The mode-based trailing stop updates the broker's position SL and does not loose
 
 **Runner clarification:** $0.20 is the open-profit activation threshold that starts trailing. It is not a promise that the stop locks exactly $0.20 of profit. The 0.50 figure is a price distance, not a dollar amount. Broker stop/freeze rules may widen the effective distance.
 
+### Profit confirmation and reversal grace
+
+The current version adds a short grace after a mode's trailing activation:
+
+1. As soon as position profit reaches its mode's activation threshold, the broker-side trailing SL is recalculated on every tick, subject to broker stop/freeze restrictions.
+2. The EA starts a **45-second grace** after profit reaches **twice** the mode's activation threshold on **two consecutive ticks**: Runner at $0.40; Normal and Tight at $0.30.
+3. During grace, the EA tracks the favorable-price peak and intended trailing level on every tick, while moving the broker-side SL to the configured **-$0.40 monetary loss level** so the regular tight trail does not close the trade on an ordinary pullback.
+4. If position profit reaches **-$0.40 during grace**, the EA attempts to close the position. This is not a guaranteed fill price: fast moves, gaps, spread, or broker stop/freeze restrictions can cause an earlier or larger loss. The EA logs when the broker prevents the grace SL update.
+5. After 45 seconds, the EA restores the trailing level derived from the best favorable price observed during grace. If that level has already been crossed, it attempts to close immediately; otherwise, normal per-tick mode trailing continues.
+
+Once this grace has started, the legacy recovery-timer / drawdown-recovery exits are suppressed for the basket so they do not preempt the grace loss cap or the post-grace trailing exit. The existing **300-second maximum-hold exit** and configured basket / monetary stop targets remain enabled and can still close a position independently.
+
 ### Other coded protections and exits
 
 Reviewed source defaults and checks include:
@@ -109,7 +121,8 @@ Reviewed source defaults and checks include:
 - `BasketSL`: $2.00, subject to the source's hold-time and symbol-specific conditions.
 - `EmergencySL`: $3.00 after a 60-second minimum trade age for applicable symbols.
 - `TradeSLMoney`: $2.00 per-position monetary stop target.
-- A five-minute time exit for an open position.
+- A five-minute (300-second) maximum-hold exit for an open position.
+- A 45-second trailing-activation grace with a -$0.40 software loss limit.
 - Recovery-related state and exit handling.
 
 These are configurable/source defaults, not recommended account settings. The EA has symbol-specific branches; users should check the current source and test on their broker and instrument.
