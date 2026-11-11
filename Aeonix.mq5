@@ -160,14 +160,10 @@ bool     CrossDetected       = false; // Cross spotted during forming candle
 int      CrossDirection      = 0;     // 1=buy cross, -1=sell cross
 datetime TradeOpenTime = 0;
 datetime LastCrossTime = 0;
-bool LastTradeWasLoss = false;
 ulong LastClosedDeal = 0;
-datetime RecoveryLossTime = 0;
 bool specialDecisionFound = false;
 bool specialTradeBuy = false;
 datetime TradeOpenBar = 0;
-bool WaitForRecoveryCandleClose = false;
-bool RecoveryWaitingForClose = false;
 double SmartProfitPeak = 0.0;
 double SmartProfitLock = -1.0;
 bool GraceTimerActive = false;
@@ -189,7 +185,6 @@ double PrevMA20 = 0;
 bool MAInitialized = false;
 input bool EnableGraceTimer = true;
 input int GraceTimerSeconds = 30;
-bool TwoDollarDrawdownReached = false;
 input double MinimumCandleStrengthPercent = 0.0;
 bool PreProcessStarted = false;
 
@@ -254,16 +249,6 @@ double SavedCLowerWick = 0;
 double SignalUpperWick = 0.0;
 double SignalLowerWick = 0.0;
 
-bool RecoveryTrade = false;
-bool RecoveryLockActive = false;
-double RecoveryLock = 0.10;
-bool RecoveryMovedHigher = false;
-bool RecoveryTimerStarted = false;
-datetime RecoveryStartTime = 0;
-double RecoveryTriggerProfit = 0.10;
-int RecoveryTimerSeconds = 120;
-bool RecoveryReached = false;
-bool HadDeepDrawdown = false;
 input double TradeSLMoney = 2.00;
 input double AegisModeLockLoss = 1.00;
 input int AegisTrailGraceSeconds = 45;
@@ -1955,16 +1940,6 @@ GraceTimerFinished = false;
 GraceStartTime     = 0;
 
 HighProfitMode = false;
-//================ RECOVERY RESET ================
-
-RecoveryTrade = false;
-RecoveryReached = false;
-RecoveryLockActive = false;
-RecoveryTimerStarted = false;
-
-RecoveryStartTime = 0;
-HadDeepDrawdown = false;
-TwoDollarDrawdownReached = false;
 }
 
 bool HoldTimeFinished()
@@ -2051,44 +2026,6 @@ if(!ProfitModePrintInitialized ||
 }
 
 
-   //==================================================
-   // $2 DRAWDOWN — ACTIVE FROM TRADE START
-   //==================================================
-
-   if(profit <= -2.00 &&
-      !TwoDollarDrawdownReached)
-   {
-      TwoDollarDrawdownReached = true;
-
-      PrintFormat(
-         "2$ DRAWDOWN REACHED >>> Profit=%.2f | RECOVERY ARMED",
-         profit
-      );
-   }
-
-
-   //==================================================
-   // RECOVERY EXIT
-   //==================================================
-
-   if(!ModeTrailMinimumReached &&
-      !ModeTrailGraceUsed &&
-      TwoDollarDrawdownReached &&
-      profit > -0.50)
-   {
-      PrintFormat(
-         "RECOVERY EXIT >>> Profit=%.3f",
-         profit
-      );
-
-      CloseAllTrades();
-      ResetBasket();
-      SignalAlreadyTraded = true;
-
-      return;
-   }
-
-
 /*   //==================================================
    // 180 SECOND HARD SL
    //==================================================
@@ -2109,57 +2046,6 @@ if(!ProfitModePrintInitialized ||
       return;
    } */
 
-
-   //==================================================
-   // RECOVERY DETECTION
-   // WORKS IN ALL MODES
-   //==================================================
-
-   if(profit <= -0.40)
-   {
-      HadDeepDrawdown = true;
-      RecoveryTrade = true;
-   }
-
-
-   //==================================================
-   // RECOVERY REACHED
-   //==================================================
-
-   if(HadDeepDrawdown &&
-      RecoveryTrade &&
-      !RecoveryReached &&
-      profit >= RecoveryLock)
-   {
-      RecoveryReached = true;
-
-      PrintFormat(
-         "RECOVERY REACHED >>> Profit=%.2f",
-         profit
-      );
-   }
-
-
-   //==================================================
-   // START RECOVERY TIMER
-   //==================================================
-
-   if(HadDeepDrawdown &&
-      RecoveryTrade &&
-      !RecoveryLockActive &&
-      RecoveryReached &&
-      profit > RecoveryLock)
-   {
-      RecoveryLockActive = true;
-
-      RecoveryTimerStarted = true;
-      RecoveryStartTime = TimeCurrent();
-
-      PrintFormat(
-         "RECOVERY TIMER STARTED >>> Profit=%.2f | 30 SEC",
-         profit
-      );
-   }
 
 /*
    //==================================================
@@ -2473,82 +2359,6 @@ if(!ProfitModePrintInitialized ||
       }
    }
 */
-
-   //==================================================
-   // RECOVERY TIMER
-   //
-   // WORKS IN ALL THREE MODES
-   //==================================================
-
-   if(!ModeTrailMinimumReached &&
-      !ModeTrailGraceUsed &&
-      RecoveryTimerStarted)
-   {
-      //==============================================
-      // $0.50 = RECOVERY CANCELLED
-      //==============================================
-
-      if(profit >= 0.50)
-      {
-         RecoveryTimerStarted = false;
-         RecoveryLockActive = false;
-         RecoveryReached = false;
-         RecoveryTrade = false;
-         RecoveryStartTime = 0;
-         HadDeepDrawdown = false;
-
-         PrintFormat(
-            "RECOVERY CANCELLED >>> Profit=%.2f",
-            profit
-         );
-      }
-
-      //==============================================
-      // +$0.15 = RECOVERY PASSED
-      //==============================================
-
-      else if(profit >= 0.15)
-      {
-         RecoveryTimerStarted = false;
-         RecoveryLockActive = false;
-         RecoveryReached = false;
-         RecoveryTrade = false;
-         RecoveryStartTime = 0;
-         HadDeepDrawdown = false;
-
-         PrintFormat(
-            "RECOVERY PASSED >>> Profit=%.2f | Minimum=0.15",
-            profit
-         );
-      }
-
-      //==============================================
-      // 30 SEC FAILED
-      //==============================================
-
-      else if(TimeCurrent() - RecoveryStartTime >= 30)
-      {
-         PrintFormat(
-            "RECOVERY FAILED >>> Profit=%.2f | Required=0.15",
-            profit
-         );
-
-         CloseAllTrades();
-         ResetBasket();
-
-         RecoveryTrade = false;
-         RecoveryReached = false;
-         RecoveryLockActive = false;
-         RecoveryTimerStarted = false;
-         RecoveryStartTime = 0;
-         HadDeepDrawdown = false;
-
-         SignalAlreadyTraded = true;
-
-         return;
-      }
-   }
-
 
    //==================================================
    // GRACE TIMER EXPIRY
@@ -6068,10 +5878,6 @@ if(newBar && CachedCaseDetected)
 {
 if(CachedCaseDetected)
    return;
-if(LastTradeWasLoss)
-{
-   Print(">>> RECOVERY MODE ACTIVE");
-}
    bool signalBull = OlderBullish();
    bool signalBear = OlderBearish();
 
