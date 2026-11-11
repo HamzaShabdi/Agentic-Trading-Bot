@@ -1,40 +1,44 @@
 # Aeonix
 
-**A context-aware, precision-timed M5 trading Expert Advisor for MetaTrader 5.**
+**An advanced, explainable, rule-based M5 trading Expert Advisor for MetaTrader 5.**
 
-Aeonix is an experimental MQL5 Expert Advisor created for the **AgentX hackathon**. It starts with an MA 5 / MA 20 crossover, but does not treat the crossover as a complete trade decision. A directional cross is accepted only when MA 200 is on the corresponding side of both averages. The EA then stages market analysis, candle-pattern and wick checks, a final direction decision, and risk controls around that signal.
+Aeonix is an experimental MQL5 Expert Advisor created for the **AgentX hackathon**. Its algorithm is a multi-stage technical-analysis pipeline: an MA 5 / MA 20 crossover starts a setup, MA 200 alignment checks the direction, Aegis classifies market context, and Phoenix/HAFS evaluates three-candle patterns and wick evidence before the final direction is frozen. It then submits a broker-side SL/TP request and manages the position with staged protection.
 
-> Aeonix is a deterministic, rule-based trading system. “Aegis” and “Phoenix” are names for software decision modules, not trained AI models. Trading involves substantial risk; no profitability or accuracy is guaranteed.
+> Aeonix is deterministic software: it does not train a model or use an external AI service to choose trades. “Aegis” and “Phoenix” are names for its rule-based software modules. Trading involves substantial risk; no profitability or accuracy is guaranteed.
 
 ## Why Aeonix is different from a basic SMA EA
 
-A basic SMA crossover EA can enter as soon as its averages cross. Aeonix uses the cross as a **setup trigger**, then evaluates more context before deciding whether and which way to trade:
+A basic SMA crossover EA can enter as soon as its averages cross. Aeonix uses the cross as a **setup trigger** in a staged, multi-signal algorithm, then evaluates context before deciding whether and which way to trade:
 
 - **Aegis** assesses market regime, direction, strength, volatility, behavior, bias, and trade-management mode.
-- **Phoenix / HAFS** evaluates a named candle-pattern case and the wick support of the live signal candle and two preceding candles.
+- **Phoenix / HAFS** maps candle-body sequences to a named case and evaluates wick support from the live signal candle and two preceding candles.
 - **Staged calculation** caches context at 290 seconds, then performs final checks and freezes the direction at 298 seconds into the M5 signal candle.
-- **Immediate execution** attempts the order on the first available tick at or after the 298-second decision. It does not intentionally wait for the next candle or 301 seconds.
+- **Late-candle execution** freezes the final decision at or after 298 seconds, then attempts the order on the first available tick at or after 299 seconds of the signal candle (typically around 299–300 seconds when ticks are flowing).
 - **Explicit stop-loss line**: the entry request includes calculated broker-side SL and TP prices. Aegis-mode trailing can subsequently move the SL in a protective direction.
 
-The design is intended to make a crossover decision more contextual and explainable. Actual accuracy or performance improvements must be established through reproducible testing; they are not assumed here.
+This is an explainable, deterministic technical-analysis algorithm—not a recognized off-the-shelf strategy or a machine-learning model. The design makes the decision path more contextual; any accuracy or performance improvement must be established through reproducible testing and is not assumed here.
+
+### Interview description
+
+“Aeonix follows a multi-stage, rule-based technical-analysis algorithm. It uses an M5 SMA crossover as the setup, confirms direction with SMA 200, evaluates market regime and bias with Aegis, checks three-candle pattern and wick evidence with Phoenix/HAFS, then freezes a direction and applies broker-side SL/TP plus staged trade management.”
 
 ## System at a glance
 
 | Layer | Responsibility |
 |---|---|
-| Signal | Detect an MA 5 / MA 20 crossover while the M5 candle is forming; require MA 200 below both for BUY or above both for SELL. |
-| Aegis | Classify market context, estimate trend or reversal bias, assess the trade type, and select a protection mode. |
-| Phoenix / HAFS | Route the setup into a candle case, evaluate A/B/C wick support, and pass a direction to Aegis final-decision logic. |
-| Execution | Freeze BUY or SELL at the final calculation stage and submit an order with calculated SL/TP. |
-| Management | Check stop-loss conditions, apply mode-based trailing, and evaluate basket and time-based exits. |
+| Signal | Detect an MA 5 / MA 20 crossover on the forming M5 candle; require MA 200 below both for BUY or above both for SELL. |
+| Aegis | Classify trending/ranging context, direction, strength, volatility, behavior, decision and bias; choose a Tight, Normal or Runner protection mode. |
+| Phoenix / HAFS | Map A/B/C candle-body patterns to a case, combine wick-support evidence and resolve the candidate direction. |
+| Decision | Apply Aegis preference to the case result, then freeze the final BUY/SELL direction before submission. |
+| Execution and management | Attempt an order from 299 seconds with calculated broker-side SL/TP; manage stops, trailing, basket limits and time-based exits. |
 
 ## Aegis: market context and trade management
 
 Aegis is the context and risk-management layer. It uses several inputs rather than relying solely on the crossover:
 
 - **Market type:** the current source classifies conditions as trending or ranging using MA 5, MA 20, and MA 200 alignment. Although a breakout enum exists, the reviewed classification function does not currently return a breakout state.
-- **Trend direction:** buy, sell, or none, based on the coded MA conditions.
-- **Trend strength:** weak, normal, or strong, using MA 5 / MA 20 separation.
+- **Trend direction:** buy, sell, or none. In a ranging classification, direction can also use the buy/sell count among the three most recent closed candles.
+- **Trend strength:** weak, normal, or strong, using MA 5 / MA 20 separation (the source thresholds are 30 and 80 points).
 - **Volatility:** low, normal, high, or extreme, based on recent M5 candle ranges. The current thresholds mark range expansion of 1.7x as high and 2.5x as extreme versus the average of prior ranges.
 - **Market behavior:** normal, choppy, momentum, rejection, or unstable.
 - **Decision and bias:** allow, caution, or reject; and trend, reversal, or unknown. These help classify the setup and preferred trade type.
@@ -59,23 +63,23 @@ The EA defines **12 base case labels** (BUY 1–6 and SELL 1–6) and **4 revers
 - A lower-wick-dominant signal can support BUY; an upper-wick-dominant signal can support SELL, subject to the configured wick-difference threshold.
 - B and C contribute their own buy/sell wick-support flags.
 - The final case logic combines the A/B/C flags and may resolve in the crossover direction or in the opposite direction.
-- Minimum total wick size and minimum candle-strength thresholds can reject a setup.
+- Minimum wick size and the configurable candle-strength threshold can reject a setup. The candle-strength input defaults to 0%, so it does not impose a positive minimum unless configured.
 - Source defaults include a 10% wick-difference threshold, a 40% strong-wick threshold, and minimum wick size of 1.0 price unit. These are configurable inputs/values, not universal market standards.
 
 After the case-specific direction is produced, Aegis maps it to a trend or reversal trade type and applies the cached context and preferred-trade logic. The resulting direction is frozen before order submission.
 
-## The 290s → 298s execution window
+## The 290s → 298s decision, 299s execution
 
-The signal candle is an M5 candle: 300 seconds in duration. Aeonix uses its final seconds for a staged decision rather than waiting until a later candle.
+The signal candle is an M5 candle: 300 seconds in duration. Aeonix stages its analysis in the final seconds, then attempts the order near the end of that same candle.
 
 | Candle age | Stage | Work performed |
 |---:|---|---|
 | Cross detected | Capture setup | Record crossover direction and signal-candle time; save preceding-candle data. |
 | **290 seconds** | Pre-processing | Cache market type, trend direction and strength, volatility, behavior, Aegis decision, market bias, candle strength, and eligible B/C wick/case data. |
-| **298 seconds or later** | Final calculation | On the first available tick at or after 298.000 seconds, recheck candle strength, calculate the live A-candle wick, detect the final HAFS case, and freeze BUY or SELL. |
-| Same eligible tick | Execution attempt | If the final direction is valid and a quote is available, immediately submit the BUY/SELL request with calculated SL and TP. |
+| **298 seconds or later** | Final calculation | On the first available tick at or after 298.000 seconds, recheck candle strength, calculate the live A-candle wick, detect the HAFS case, and freeze BUY or SELL. |
+| **299 seconds or later** | Execution attempt | On the first available tick at or after 299.000 seconds, attempt the frozen BUY/SELL request with calculated SL and TP. |
 
-This is **tick-driven**, not a timer that guarantees a quote at exactly 298.000 seconds. If no tick arrives at that instant, processing occurs on a later available tick. The intended flow does not wait for 301 seconds or for the next M5 bar.
+Both steps are **tick-driven**. If no tick arrives at 298 seconds, final calculation runs on the next available tick. The order request is attempted on the first available tick at or after 299 seconds, often during 299–300 seconds when ticks are flowing. A missing or delayed quote can push the attempt later; broker processing, rejection or slippage can also affect the fill. The timing rule itself does not guarantee a fill or profitable outcome.
 
 ## Stop-loss line and adaptive trailing
 
@@ -122,7 +126,7 @@ Reviewed source defaults and checks include:
 - `AegisModeLockLoss`: $1.00 per-position stop target after the mode minimum-profit stage.
 - A five-minute (300-second) maximum-hold exit for an open position.
 - A one-time 45-second pre-handoff grace with a -$0.40 software loss limit.
-- Recovery-related state and exit handling.
+- The legacy drawdown-recovery exit and recovery timer are disabled; the configured money stops, grace rules, and 300-second time exit still apply.
 
 These are configurable/source defaults, not recommended account settings. The EA has symbol-specific branches; users should check the current source and test on their broker and instrument.
 
@@ -135,7 +139,7 @@ The Round 1 README described profit-lock logic. The current Aeonix source shifts
 | SmartProfitLock-centered profit management | Calculated SL/TP prices are supplied with the entry request. |
 | Less emphasis on an explicit chart/broker SL | Entry SL is a broker-side price level; fixed-money SL retry and Aegis trailing are also coded. |
 | Crossover plus profit-management focus | Crossover is followed by Aegis context, Phoenix/HAFS cases, and wick/candle-strength checks. |
-| No documented late-candle staged execution in the Round 1 README | 290s pre-processing → 298s final calculation → immediate same-tick execution attempt. |
+| No documented late-candle staged execution in the Round 1 README | 290s pre-processing → 298s final calculation → first-tick execution at/after 299s. |
 
 The previous SmartProfitLock source was not included in the files reviewed for this README, so this is a comparison with the earlier project description, not a line-by-line code diff. In the current snapshot, the legacy stepped SmartProfitLock ladder block is commented out; its name and some state variables remain. The active per-tick trailing function is `ManageModeTrailingSL()`.
 
@@ -169,7 +173,7 @@ Aeonix demonstrates a modular approach to automated trade decisions:
 
 **Aegis reads market context → Phoenix/HAFS evaluates candle cases → direction is frozen → execution and SL/TP management take over.**
 
-The differentiator is not simply “MA 5 crosses MA 20.” The cross is direction-filtered by MA 200 and followed by an explainable, staged pipeline: regime and bias analysis, candle strength, pattern and wick evidence, potential direction reversal, a 290/298-second decision window, and immediate execution on the eligible tick.
+The differentiator is not simply “MA 5 crosses MA 20.” Aeonix follows an explainable, staged, multi-signal technical-analysis algorithm: MA 200 direction alignment, Aegis regime and bias analysis, Phoenix/HAFS pattern and wick evidence, a frozen decision at 298 seconds or later, and a tick-driven order attempt at 299 seconds or later. These rules do not constitute a trained AI model and do not establish trading performance without testing.
 
 ## Disclaimer
 
